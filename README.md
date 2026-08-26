@@ -220,6 +220,27 @@ export → duplicate → delete.
 
 ---
 
+## The hosted browser demo
+
+`tools/build-demo.mjs` bundles the reconstruction and the renderer into one
+self-contained HTML file that runs the whole preview pipeline client-side — no
+server, nothing uploaded, conversions kept in IndexedDB on the viewer's device:
+
+```bash
+node tools/build-demo.mjs          # -> tools/demo/build/splatworks-demo.html
+```
+
+The build inlines the real modules from `server/pipeline/` and `web/js/viewer/`
+rather than restating them, so the demo cannot drift from the tested code. What
+can't cross into a single-file page is patched explicitly in the build script:
+Node's `Buffer` becomes a typed array, the sort worker is embedded as a blob
+URL, and a few module-private helpers are renamed where merging scopes would
+collide. The output is asserted to be pure ASCII, because an embedded page
+can't declare its own charset.
+
+The demo covers converting, viewing, editing and the library. It cannot do
+COLMAP pose solving or `.ply`/`.splat` export — both of those are the local app.
+
 ## Limitations worth knowing
 
 - The preview backend assumes an orbit and cannot recover true geometry. It says

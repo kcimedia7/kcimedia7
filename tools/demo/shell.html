@@ -1,0 +1,743 @@
+<title>SplatWorks</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+
+<style>
+/*
+ * Single-theme by intent: this is a viewport instrument, and a splat renders
+ * against a dark ground the way every 3D tool renders against one. Every colour
+ * is painted explicitly from a token, so the page holds on either host ground
+ * rather than borrowing one.
+ */
+:root {
+  --ground: #0a0c11;
+  --panel: #111520;
+  --raised: #171c29;
+  --raised-hi: #1e2536;
+  --line: #242b3c;
+  --line-soft: #1b2130;
+
+  --ink: #e8ebf4;
+  --ink-dim: #98a1b8;
+  --ink-faint: #687189;
+
+  --violet: #7c6cff;
+  --violet-hi: #8f82ff;
+  --violet-wash: rgba(124, 108, 255, 0.14);
+  --teal: #3fd8c6;
+  --amber: #f0b445;
+  --note-ink: #e3cfa4;
+  --note-wash: rgba(240, 180, 69, 0.07);
+  --red: #ff6b6b;
+
+  --sans: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --cond: "IBM Plex Sans Condensed", "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --rail: 368px;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--ground);
+  color: var(--ink);
+  font: 400 15px/1.55 var(--sans);
+  -webkit-font-smoothing: antialiased;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ---------------------------------------------------------------- top bar */
+
+.topbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 11px 18px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+
+.mark {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  flex: none;
+  background:
+    radial-gradient(circle at 34% 36%, var(--violet) 0 38%, transparent 64%),
+    radial-gradient(circle at 66% 64%, var(--teal) 0 34%, transparent 62%);
+}
+
+.wordmark {
+  font-weight: 600;
+  font-size: 15px;
+  letter-spacing: -0.012em;
+}
+
+.titles { min-width: 0; display: flex; flex-direction: column; }
+
+#title {
+  font-weight: 600;
+  font-size: 14px;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#subtitle {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--ink-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.divider {
+  width: 1px;
+  align-self: stretch;
+  background: var(--line);
+  margin: 0 2px;
+}
+
+.chip {
+  margin-left: auto;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 11px 5px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-family: var(--cond);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+}
+
+.chip .dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--amber);
+}
+
+/* ------------------------------------------------------------------- note */
+
+.note {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 11px 18px;
+  background: var(--note-wash);
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--note-ink);
+}
+
+.note b { color: var(--amber); font-weight: 600; }
+.note p { margin: 0; max-width: 92ch; }
+
+.note button {
+  margin-left: auto;
+  flex: none;
+  background: none;
+  border: 0;
+  color: var(--ink-faint);
+  font: inherit;
+  font-size: 18px;
+  line-height: 1;
+  padding: 2px 4px;
+  cursor: pointer;
+  border-radius: 5px;
+}
+.note button:hover { color: var(--ink); background: rgba(255,255,255,0.06); }
+
+/* ------------------------------------------------------------------ frame */
+
+.frame {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--rail);
+}
+
+/* ------------------------------------------------------------------ stage */
+
+.stage {
+  position: relative;
+  min-width: 0;
+  background:
+    radial-gradient(ellipse 70% 60% at 50% 42%, #12162080 0%, transparent 70%),
+    #07090d;
+  overflow: hidden;
+}
+
+.stage.over::after {
+  content: "";
+  position: absolute;
+  inset: 12px;
+  border: 2px dashed var(--violet);
+  border-radius: 14px;
+  background: var(--violet-wash);
+  pointer-events: none;
+}
+
+#gl {
+  display: block;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+  cursor: grab;
+}
+#gl:active { cursor: grabbing; }
+
+.stage-overlay {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
+.empty-card {
+  max-width: 430px;
+  text-align: center;
+}
+
+.empty-card .glyph {
+  width: 68px;
+  height: 68px;
+  margin: 0 auto 20px;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  background:
+    radial-gradient(circle at 36% 34%, rgba(124,108,255,0.75) 0 34%, transparent 60%),
+    radial-gradient(circle at 64% 62%, rgba(63,216,198,0.6) 0 30%, transparent 58%),
+    var(--panel);
+}
+
+.empty-card h2 {
+  margin: 0 0 8px;
+  font-size: 19px;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  text-wrap: balance;
+}
+
+.empty-card p {
+  margin: 0 0 20px;
+  color: var(--ink-dim);
+  font-size: 13.5px;
+  line-height: 1.6;
+}
+
+.stage-tools {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  max-width: calc(100% - 24px);
+}
+
+.stage-stats {
+  position: absolute;
+  bottom: 12px;
+  left: 12px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-faint);
+  background: rgba(10, 12, 17, 0.72);
+  padding: 4px 9px;
+  border-radius: 6px;
+  pointer-events: none;
+}
+
+/* ------------------------------------------------------------------- rail */
+
+.rail {
+  min-width: 0;
+  background: var(--panel);
+  border-left: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+}
+
+.tabs {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 2px;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.tab {
+  background: none;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  padding: 11px 12px;
+  font: inherit;
+  font-family: var(--cond);
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  cursor: pointer;
+}
+.tab:hover { color: var(--ink-dim); }
+.tab.on { color: var(--ink); border-bottom-color: var(--violet); }
+
+.panel {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.muted {
+  margin: 0;
+  color: var(--ink-dim);
+  font-size: 13.5px;
+  line-height: 1.6;
+}
+
+.group {
+  display: flex;
+  flex-direction: column;
+  gap: 13px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.group:last-of-type { border-bottom: 0; padding-bottom: 0; }
+
+.group h3 {
+  margin: 0;
+  font-family: var(--cond);
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+
+/* --------------------------------------------------------------- controls */
+
+.ctrl { display: flex; flex-direction: column; gap: 5px; }
+
+.ctrl-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 12.5px;
+  color: var(--ink-dim);
+}
+
+.ctrl-value {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+
+.axis-label {
+  display: block;
+  font-size: 12.5px;
+  color: var(--ink-dim);
+  margin-bottom: 8px;
+}
+
+.axis-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 9px;
+}
+
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 16px;
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+input[type="range"]::-webkit-slider-runnable-track {
+  height: 3px;
+  border-radius: 999px;
+  background: var(--raised-hi);
+}
+input[type="range"]::-moz-range-track {
+  height: 3px;
+  border-radius: 999px;
+  background: var(--raised-hi);
+}
+input[type="range"]::-moz-range-progress {
+  height: 3px;
+  border-radius: 999px;
+  background: var(--violet);
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  margin-top: -4.5px;
+  border-radius: 50%;
+  background: var(--violet);
+  border: 2px solid var(--panel);
+  box-shadow: 0 0 0 1px var(--violet);
+}
+input[type="range"]::-moz-range-thumb {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--violet);
+  border: 2px solid var(--panel);
+  box-shadow: 0 0 0 1px var(--violet);
+}
+
+select {
+  font: inherit;
+  font-size: 13.5px;
+  width: 100%;
+  color: var(--ink);
+  background: var(--raised);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 13.5px;
+  color: var(--ink-dim);
+  cursor: pointer;
+}
+.check input { accent-color: var(--violet); width: 15px; height: 15px; }
+
+/* ---------------------------------------------------------------- buttons */
+
+.btn {
+  font: inherit;
+  font-size: 13.5px;
+  color: var(--ink);
+  background: var(--raised);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 13px;
+  cursor: pointer;
+  transition: background 0.14s, border-color 0.14s;
+}
+.btn:hover:not(:disabled) { background: var(--raised-hi); border-color: #303a52; }
+.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.btn.on { color: var(--violet); border-color: var(--violet); background: var(--violet-wash); }
+
+.btn.primary {
+  background: var(--violet);
+  border-color: var(--violet-hi);
+  color: #fff;
+  font-weight: 500;
+}
+.btn.primary:hover:not(:disabled) { background: var(--violet-hi); }
+
+.btn.tool {
+  font-size: 12px;
+  padding: 5px 10px;
+  background: rgba(17, 21, 32, 0.82);
+}
+
+:focus-visible { outline: 2px solid var(--violet); outline-offset: 2px; }
+
+/* --------------------------------------------------------------- progress */
+
+.progress-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--ink-dim);
+  margin-bottom: 6px;
+}
+.progress-head span:last-child { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+.track {
+  height: 5px;
+  border-radius: 999px;
+  background: var(--raised-hi);
+  overflow: hidden;
+}
+
+.track i {
+  display: block;
+  height: 100%;
+  width: 0;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--violet), var(--teal));
+  transition: width 0.25s ease;
+}
+
+/* ---------------------------------------------------------------- library */
+
+.lib-item {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--raised);
+}
+.lib-item.on { border-color: var(--violet); }
+
+.lib-open {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 9px;
+  background: none;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.lib-open:hover { background: var(--raised-hi); }
+
+.lib-open img {
+  width: 54px;
+  height: 40px;
+  object-fit: cover;
+  border-radius: 6px;
+  flex: none;
+  background: var(--ground);
+}
+
+.lib-text { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+
+.lib-text strong {
+  font-size: 13.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lib-text em {
+  font-style: normal;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-faint);
+}
+
+.lib-del {
+  flex: none;
+  width: 34px;
+  background: none;
+  border: 0;
+  border-left: 1px solid var(--line);
+  color: var(--ink-faint);
+  font-size: 19px;
+  line-height: 1;
+  cursor: pointer;
+}
+.lib-del:hover { color: var(--red); background: rgba(255, 107, 107, 0.08); }
+
+/* ----------------------------------------------------------------- toasts */
+
+.toasts {
+  position: fixed;
+  bottom: 16px;
+  right: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 40;
+}
+
+.toast {
+  background: var(--raised);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--violet);
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 13px;
+  max-width: 330px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+  transition: opacity 0.25s;
+}
+.toast.ok { border-left-color: var(--teal); }
+.toast.error { border-left-color: var(--red); }
+
+.hint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--ink-faint);
+}
+
+.hint code {
+  font-family: var(--mono);
+  font-size: 11px;
+  background: var(--raised);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 1px 5px;
+  color: var(--ink-dim);
+}
+
+[hidden] { display: none !important; }
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}
+
+@media (max-width: 860px) {
+  .frame {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: 54vh minmax(0, 1fr);
+  }
+  .rail { border-left: 0; border-top: 1px solid var(--line); }
+  .titles { display: none; }
+}
+</style>
+
+<header class="topbar">
+  <span class="mark" aria-hidden="true"></span>
+  <span class="wordmark">SplatWorks</span>
+  <span class="divider" aria-hidden="true"></span>
+  <span class="titles">
+    <span id="title">SplatWorks</span>
+    <span id="subtitle">Photos and video to gaussian splats, in your browser</span>
+  </span>
+  <span class="chip"><span class="dot"></span>Preview backend</span>
+</header>
+
+<div class="note" id="note">
+  <p>
+    <b>This runs entirely on your device.</b> Nothing is uploaded. Because a browser can't
+    run COLMAP or a CUDA trainer, it uses the project's <b>preview reconstruction</b>: it assumes
+    you orbited the subject and back-projects each frame into gaussians. That's a fast proxy,
+    not structure-from-motion &mdash; real pose solving and <code>.ply</code> export are in the local app.
+  </p>
+  <button id="dismiss" title="Dismiss" aria-label="Dismiss this note">&times;</button>
+</div>
+
+<main class="frame">
+  <section class="stage" id="stage">
+    <canvas id="gl"></canvas>
+
+    <div class="stage-overlay" id="empty">
+      <div class="empty-card">
+        <div class="glyph" aria-hidden="true"></div>
+        <h2>Drop a video or a set of photos</h2>
+        <p>
+          Best results come from a full orbit around one subject &mdash; 20&ndash;60 stills, or a slow
+          10&ndash;30 second walk-around clip. Frames are decoded by your browser, so any format
+          it can play will work.
+        </p>
+        <button class="btn primary" id="pick-empty">Choose files</button>
+      </div>
+    </div>
+
+    <div class="stage-tools" id="stage-tools" hidden>
+      <button class="btn tool" id="fit">Fit</button>
+      <button class="btn tool" id="front">Front</button>
+      <button class="btn tool" id="side">Side</button>
+      <button class="btn tool" id="top">Top</button>
+      <button class="btn tool" id="spin">Spin</button>
+      <button class="btn tool" id="snapshot" hidden>Snapshot</button>
+    </div>
+
+    <div class="stage-stats" id="stage-stats" hidden></div>
+  </section>
+
+  <aside class="rail">
+    <nav class="tabs">
+      <button class="tab on" data-tab="convert">Convert</button>
+      <button class="tab" data-tab="edit">Edit</button>
+      <button class="tab" data-tab="library">Library</button>
+    </nav>
+
+    <div class="panel" data-panel="convert">
+      <section class="group">
+        <h3>Source</h3>
+        <button class="btn primary" id="convert">Choose photos or video</button>
+        <input type="file" id="files" accept="image/*,video/*" multiple hidden>
+        <p class="hint">Conversion starts as soon as you pick files.</p>
+        <div id="progress" hidden>
+          <div class="progress-head">
+            <span id="progress-label"></span><span id="progress-pct"></span>
+          </div>
+          <div class="track"><i id="progress-bar"></i></div>
+        </div>
+      </section>
+
+      <section class="group">
+        <h3>Settings</h3>
+        <label class="ctrl">
+          <span class="ctrl-head"><span>Frames to sample from video</span><span class="ctrl-value" id="frames-value">28</span></span>
+          <input type="range" id="frames" min="8" max="60" step="4" value="28">
+        </label>
+        <label class="ctrl">
+          <span class="ctrl-head"><span>Reconstruction detail</span><span class="ctrl-value" id="detail-value">150</span></span>
+          <input type="range" id="detail" min="60" max="280" step="10" value="150">
+        </label>
+        <label class="ctrl">
+          <span class="ctrl-head"><span>How far the camera travelled</span></span>
+          <select id="arc">
+            <option value="360">Full orbit (360&deg;)</option>
+            <option value="180">Half orbit (180&deg;)</option>
+            <option value="90">Quarter turn (90&deg;)</option>
+            <option value="0">Single viewpoint</option>
+          </select>
+        </label>
+        <p class="hint">
+          Tell it how far you actually moved and the per-frame reliefs line up better.
+        </p>
+      </section>
+
+      <section class="group">
+        <h3>Controls</h3>
+        <p class="hint">
+          Drag to orbit &middot; scroll to zoom &middot; shift-drag or right-drag to pan &middot; two fingers on touch.
+        </p>
+      </section>
+    </div>
+
+    <div class="panel" data-panel="edit" hidden></div>
+    <div class="panel" data-panel="library" hidden></div>
+  </aside>
+</main>
+
+<div class="toasts" id="toasts"></div>
+
+<script type="module">
+/*{{BUNDLE}}*/
+</script>
