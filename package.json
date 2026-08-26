@@ -1,0 +1,13 @@
+{
+  "name": "splatworks",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Turn photos and videos into 3D Gaussian Splats, then view and edit them in a library.",
+  "engines": { "node": ">=22.0.0" },
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "test": "node --test 'test/**/*.test.js'"
+  }
+}

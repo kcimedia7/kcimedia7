@@ -1,0 +1,140 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { reconstructPreview } from '../server/pipeline/preview.js';
+import { pickEvenly, stagePlan } from '../server/pipeline/index.js';
+import { buildTrainerArgv, tokenize } from '../server/pipeline/colmap.js';
+import { sanitiseSettings } from '../server/api.js';
+import { boundsOf } from '../server/pipeline/splat.js';
+
+/** A frame with a bright subject on a flat backdrop. */
+function frame(width = 96, height = 72, hue = 0) {
+  const data = Buffer.alloc(width * height * 4);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = (y * width + x) * 4;
+      data[i] = 40; data[i + 1] = 42; data[i + 2] = 48; data[i + 3] = 255;
+      const d = Math.hypot(x - width / 2, y - height / 2);
+      if (d < width / 4) {
+        data[i] = 220 - hue; data[i + 1] = 90 + hue; data[i + 2] = 180;
+      }
+    }
+  }
+  return { width, height, data };
+}
+
+test('preview reconstruction builds a normalised, non-empty cloud', () => {
+  const frames = [0, 1, 2, 3, 4, 5].map((i) => frame(96, 72, i * 20));
+  const { cloud, stats } = reconstructPreview(frames, { grid: 64 });
+
+  assert.ok(cloud.count > 100, `expected a substantial cloud, got ${cloud.count}`);
+  assert.equal(stats.frames, 6);
+  assert.equal(stats.splats, cloud.count);
+
+  // normaliseCloud should have centred it in a unit-ish volume.
+  const { center, radius } = boundsOf(cloud);
+  for (const c of center) assert.ok(Math.abs(c) < 1.5, 'roughly centred');
+  assert.ok(radius > 0.2 && radius < 4, `radius ${radius} should be order 1`);
+});
+
+test('every reconstructed gaussian is finite and in range', () => {
+  const { cloud } = reconstructPreview([frame(), frame(96, 72, 40)], { grid: 48 });
+  for (let i = 0; i < cloud.count; i++) {
+    for (let k = 0; k < 3; k++) {
+      assert.ok(Number.isFinite(cloud.positions[i * 3 + k]), 'position is finite');
+      assert.ok(cloud.scales[i * 3 + k] > 0, 'scale is positive');
+      const c = cloud.colors[i * 3 + k];
+      assert.ok(c >= 0 && c <= 1, `colour ${c} in range`);
+    }
+    assert.ok(cloud.opacities[i] > 0 && cloud.opacities[i] <= 1, 'opacity in range');
+    const q = [0, 1, 2, 3].map((k) => cloud.rotations[i * 4 + k]);
+    assert.ok(Math.abs(Math.hypot(...q) - 1) < 1e-3, 'rotation is a unit quaternion');
+  }
+});
+
+test('reconstruction is deterministic for the same input', () => {
+  const frames = [frame(), frame(96, 72, 30)];
+  const a = reconstructPreview(frames, { grid: 48 }).cloud;
+  const b = reconstructPreview(frames, { grid: 48 }).cloud;
+  assert.equal(a.count, b.count);
+  assert.deepEqual(Array.from(a.positions.slice(0, 60)), Array.from(b.positions.slice(0, 60)));
+});
+
+test('a single frame still produces a viewable relief', () => {
+  const { cloud } = reconstructPreview([frame()], { grid: 48 });
+  assert.ok(cloud.count > 50);
+});
+
+test('reconstruction needs at least one frame', () => {
+  assert.throws(() => reconstructPreview([], {}), /at least one frame/);
+});
+
+test('a 360 degree orbit does not stack the last frame onto the first', () => {
+  // Closed arcs must step by n, not n-1, or two cameras coincide.
+  const frames = [0, 1, 2, 3].map((i) => frame(64, 48, i * 30));
+  const { cloud } = reconstructPreview(frames, { grid: 40, arcDeg: 360 });
+  assert.ok(cloud.count > 0);
+  const { min, max } = boundsOf(cloud);
+  // Cameras all round the subject means real extent on both horizontal axes.
+  assert.ok(max[0] - min[0] > 0.5, 'x extent');
+  assert.ok(max[2] - min[2] > 0.5, 'z extent');
+});
+
+test('pickEvenly keeps the ends and thins the middle', () => {
+  const items = Array.from({ length: 100 }, (_, i) => i);
+  const picked = pickEvenly(items, 10);
+  assert.equal(picked.length, 10);
+  assert.equal(picked[0], 0);
+  assert.equal(picked.at(-1), 99);
+  assert.deepEqual(picked, [...picked].sort((a, b) => a - b));
+
+  assert.deepEqual(pickEvenly([1, 2, 3], 10), [1, 2, 3]);
+});
+
+test('stage plans cover the whole progress bar', () => {
+  for (const backend of ['preview', 'colmap']) {
+    const total = stagePlan(backend).reduce((n, s) => n + s.weight, 0);
+    assert.ok(Math.abs(total - 1) < 1e-9, `${backend} weights sum to 1`);
+  }
+});
+
+test('trainer command templates expand their placeholders', () => {
+  const { cmd, args } = buildTrainerArgv(
+    'python train.py -s {source} -m {output} --iterations {iterations}',
+    { source: '/data/ds', output: '/data/out', images: '/data/ds/images', iterations: 7000 },
+  );
+  assert.equal(cmd, 'python');
+  assert.deepEqual(args, ['train.py', '-s', '/data/ds', '-m', '/data/out', '--iterations', '7000']);
+});
+
+test('quoted paths in a trainer template stay one argument', () => {
+  assert.deepEqual(
+    tokenize('python "/opt/gaussian splatting/train.py" -s {source}'),
+    ['python', '/opt/gaussian splatting/train.py', '-s', '{source}'],
+  );
+});
+
+test('an unknown placeholder in a trainer template is reported', () => {
+  assert.throws(
+    () => buildTrainerArgv('train --thing {nonsense}', { source: 'a', output: 'b', images: 'c', iterations: 1 }),
+    /unknown placeholder/,
+  );
+});
+
+test('settings from the client are clamped and filtered', () => {
+  const s = sanitiseSettings({
+    backend: 'rm -rf /',
+    iterations: 1e9,
+    detail: -50,
+    arcDeg: 720,
+    splatScale: 'big',
+    injected: 'should not survive',
+  });
+  assert.equal(s.backend, undefined);
+  assert.equal(s.iterations, 60_000);
+  assert.equal(s.detail, 24);
+  assert.equal(s.arcDeg, 360);
+  assert.equal(s.splatScale, undefined);
+  assert.equal(s.injected, undefined);
+
+  assert.equal(sanitiseSettings({ backend: 'preview' }).backend, 'preview');
+});
