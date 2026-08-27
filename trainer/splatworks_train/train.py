@@ -151,14 +151,15 @@ def train(args, log=print):
         if step % max(1, total // 20) == 0 or step == 1:
             with torch.no_grad():
                 quality = psnr(image, view["image"])
-            history.append({"step": step, "loss": float(loss), "l1": float(l1),
+            loss_value, l1_value = float(loss.detach()), float(l1.detach())
+            history.append({"step": step, "loss": loss_value, "l1": l1_value,
                             "psnr": quality, "gaussians": model.count,
                             "overflow_tiles": info.get("overflow_tiles", 0)})
             # A non-zero overflow means the per-tile cap is discarding gaussians
             # and the render no longer matches what the model actually says.
             overflow = info.get("overflow_tiles", 0)
             warn = f"  [!] {overflow} tiles over cap (peak {info.get('max_occupancy', 0)})" if overflow else ""
-            log(f"iter {step}/{total}  loss {float(loss):.4f}  l1 {float(l1):.4f}  "
+            log(f"iter {step}/{total}  loss {loss_value:.4f}  l1 {l1_value:.4f}  "
                 f"psnr {quality:.2f}dB  gaussians {model.count}{warn}")
 
         if densify_from <= step <= densify_until and step % densify_every == 0:

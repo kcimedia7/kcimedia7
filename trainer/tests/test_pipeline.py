@@ -111,7 +111,12 @@ def test_training_converges_and_writes_a_valid_ply(dataset, tmp_path):
 
     ply = Path(report["ply"])
     assert ply.exists()
-    header = ply.read_bytes()[:400].decode("latin1")
+    # Read to end_header rather than a fixed prefix: the 17 properties run past
+    # any small fixed slice, which silently hides the trailing ones.
+    raw = ply.read_bytes()[:4096]
+    end = raw.find(b"end_header")
+    assert end != -1, "no end_header in the first 4 KiB"
+    header = raw[:end].decode("latin1")
     assert header.startswith("ply")
     assert "format binary_little_endian 1.0" in header
     for prop in ("x", "f_dc_0", "opacity", "scale_0", "rot_3"):
