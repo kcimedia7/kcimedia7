@@ -4,3 +4,6 @@ data/
 .DS_Store
 tools/demo/build/
 dist/
+__pycache__/
+*.pyc
+.pytest_cache/

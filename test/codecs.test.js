@@ -158,3 +158,39 @@ test('quatFromBasis and quatToMatrix are inverses', () => {
   assert.deepEqual(col(1).map((v) => Math.round(v)), up);
   assert.deepEqual(col(2).map((v) => Math.round(v)), forward);
 });
+
+test('a PLY written by the Python trainer decodes identically in JavaScript', async () => {
+  // The trainer writes the model and the viewer reads it, in different
+  // languages. This fixture came out of trainer/splatworks_train/ply_io.py with
+  // hand-chosen values, so a format drift on either side fails here rather than
+  // showing up as a wrong-looking splat.
+  const fsp = await import('node:fs/promises');
+  const path = await import('node:path');
+  const url = await import('node:url');
+  const here = path.dirname(url.fileURLToPath(import.meta.url));
+  const buf = await fsp.readFile(path.join(here, 'fixtures', 'trainer_output.ply'));
+
+  const cloud = decodePly(buf);
+  assert.equal(cloud.count, 5);
+
+  // Positions are stored raw.
+  assert.deepEqual(Array.from(cloud.positions.slice(0, 6)), [0, 0, 0, 1, -2, 3]);
+
+  // f_dc_* are degree-0 SH coefficients; the reader applies 0.5 + C0 * dc.
+  assert.ok(Math.abs(cloud.colors[0] - 1.0) < 1e-5, 'red channel');
+  assert.ok(Math.abs(cloud.colors[1] - 0.5) < 1e-5, 'green channel');
+  assert.ok(Math.abs(cloud.colors[2] - 0.0) < 1e-5, 'blue channel');
+
+  // Opacity is a logit; sigmoid(0)=0.5, sigmoid(2.1972)=0.9, sigmoid(-2.1972)=0.1.
+  assert.ok(Math.abs(cloud.opacities[0] - 0.5) < 1e-5);
+  assert.ok(Math.abs(cloud.opacities[1] - 0.9) < 1e-5);
+  assert.ok(Math.abs(cloud.opacities[2] - 0.1) < 1e-5);
+
+  // Scales are logs; rotations are unit quaternions with w first.
+  for (let i = 0; i < 5; i++) {
+    assert.ok(Math.abs(cloud.scales[i * 3 + 0] - 0.1) < 1e-6);
+    assert.ok(Math.abs(cloud.scales[i * 3 + 1] - 0.2) < 1e-6);
+    assert.ok(Math.abs(cloud.scales[i * 3 + 2] - 0.3) < 1e-6);
+    assert.deepEqual(Array.from(cloud.rotations.slice(i * 4, i * 4 + 4)), [1, 0, 0, 0]);
+  }
+});

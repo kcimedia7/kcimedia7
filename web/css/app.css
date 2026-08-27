@@ -109,7 +109,8 @@ a { color: inherit; }
   width: 7px; height: 7px; border-radius: 50%;
   background: var(--text-faint);
 }
-.backend-badge[data-backend="colmap"] .dot { background: var(--green); box-shadow: 0 0 8px #4ade8080; }
+.backend-badge[data-backend="colmap"] .dot,
+.backend-badge[data-backend="gaussian"] .dot { background: var(--green); box-shadow: 0 0 8px #4ade8080; }
 .backend-badge[data-backend="preview"] .dot { background: var(--amber); }
 
 /* ---------- layout ---------- */

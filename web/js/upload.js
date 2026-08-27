@@ -75,7 +75,8 @@ export function renderUpload(host, { capabilities, onCreated }) {
   const submit = el('button', { class: 'primary', disabled: true, onclick: start },
     'Convert to splat');
 
-  const advanced = capabilities?.backend === 'preview'
+  const reconstructs = Boolean(capabilities?.reconstructs);
+  const advanced = !reconstructs
     ? el('div', { class: 'group' },
         el('p', { class: 'group-title' }, 'Preview backend settings'),
         detailSlider,
@@ -98,7 +99,7 @@ export function renderUpload(host, { capabilities, onCreated }) {
         'Frames are decoded in your browser, so any format your device can play works — ' +
         'no server-side video tooling required.')),
 
-    capabilities?.backend === 'preview' ? previewNotice(capabilities) : null,
+    capabilities?.backend === 'preview' ? previewNotice(capabilities) : reconstructionNotice(capabilities),
 
     el('div', { class: 'upload-grid' },
       el('div', { class: 'card' }, fileInput, dropzone, summary, progressWrap),
@@ -155,6 +156,10 @@ export function renderUpload(host, { capabilities, onCreated }) {
       setProgress(0.02, 'Reading frames');
       const { frames, kind, previews } = await extractFrames(state.files, {
         targetFrames: state.settings.targetFrames,
+        // Feature matching lives or dies on resolution: SfM needs detail the
+        // preview backend has no use for, so only pay the upload cost when the
+        // backend will actually solve poses.
+        maxDim: capabilities?.reconstructs ? 1600 : 640,
         onProgress: ({ done, total, label }) => {
           setProgress(0.02 + 0.48 * (total ? done / total : 0), label);
         },
@@ -197,6 +202,21 @@ export function renderUpload(host, { capabilities, onCreated }) {
       submit.textContent = 'Convert to splat';
     }
   }
+}
+
+function reconstructionNotice(capabilities) {
+  const bundled = capabilities?.backend === 'gaussian';
+  return el('div', { class: 'notice', style: { borderColor: '#1f3a2a', background: '#101a14', color: '#bfe6cd' } },
+    el('strong', { style: { color: '#7ee2a8' } }, 'Full reconstruction is available. '),
+    bundled
+      ? 'Camera poses are solved with COLMAP and the gaussians are optimised against your '
+        + 'photos, so the result is a true 3D Gaussian Splat. Training runs on the CPU here, '
+        + 'which is slow but real — expect minutes, not seconds.'
+      : 'COLMAP and the configured trainer will solve camera poses and optimise the gaussians.',
+    capabilities?.reasons?.length
+      ? el('span', { style: { display: 'block', marginTop: '6px', opacity: '.85' } },
+          capabilities.reasons.join(' '))
+      : null);
 }
 
 function previewNotice(capabilities) {

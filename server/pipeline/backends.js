@@ -1,13 +1,20 @@
-import { commandExists } from './run.js';
-import { BACKEND } from '../config.js';
+import path from 'node:path';
+import fs from 'node:fs';
+import { commandExists, run } from './run.js';
+import { BACKEND, ROOT } from '../config.js';
 
 /**
- * Which reconstruction path this machine can actually run.
+ * Which reconstruction path this machine can actually run, best first:
  *
- * A real 3D Gaussian Splatting conversion needs structure-from-motion (COLMAP)
- * to recover camera poses, then a CUDA trainer to optimise the gaussians. Both
- * are heavy external installs, so they are detected rather than bundled, and the
- * preview backend covers the machine that has neither.
+ *   colmap    an external COLMAP binary plus the CUDA trainer named by
+ *             SPLAT_TRAINER_CMD -- the fastest route when a GPU box is set up
+ *   gaussian  the bundled Python trainer in trainer/: pycolmap solves the poses
+ *             and a differentiable rasterizer optimises the gaussians. Real 3DGS
+ *             with no GPU and no system installs, just two pip wheels
+ *   preview   the dependency-free proxy, for a machine with neither
+ *
+ * Only `preview` is a different kind of output. The first two both produce a
+ * genuine reconstruction; they differ in how fast they get there.
  */
 
 let cached = null;
@@ -15,22 +22,48 @@ let cached = null;
 export const TRAINER_CMD = process.env.SPLAT_TRAINER_CMD || '';
 export const COLMAP_CMD = process.env.SPLAT_COLMAP_CMD || 'colmap';
 export const FFMPEG_CMD = process.env.SPLAT_FFMPEG_CMD || 'ffmpeg';
+export const PYTHON_CMD = process.env.SPLAT_PYTHON_CMD || 'python3';
+export const TRAINER_DIR = process.env.SPLAT_TRAINER_DIR || path.join(ROOT, 'trainer');
+
+/** Does `python3` in trainer/ have the two wheels the bundled trainer needs? */
+async function detectPythonTrainer() {
+  if (!fs.existsSync(path.join(TRAINER_DIR, 'splatworks_train', 'train.py'))) {
+    return { available: false, reason: 'the bundled trainer is not present' };
+  }
+  const missing = [];
+  try {
+    await run(PYTHON_CMD, ['-c', 'import pycolmap'], { cwd: TRAINER_DIR, timeoutMs: 60_000 });
+  } catch {
+    missing.push('pycolmap');
+  }
+  try {
+    await run(PYTHON_CMD, ['-c', 'import torch'], { cwd: TRAINER_DIR, timeoutMs: 120_000 });
+  } catch {
+    missing.push('torch');
+  }
+  if (missing.length) {
+    return { available: false, reason: `install ${missing.join(' and ')} (pip install -r trainer/requirements.txt)` };
+  }
+  return { available: true, reason: null };
+}
 
 export async function detectCapabilities({ refresh = false } = {}) {
   if (cached && !refresh) return cached;
 
-  const [colmap, ffmpeg, gpu] = await Promise.all([
+  const [colmap, ffmpeg, gpu, python] = await Promise.all([
     commandExists(COLMAP_CMD, ['--help']),
     commandExists(FFMPEG_CMD, ['-version']),
     commandExists('nvidia-smi', ['-L']),
+    detectPythonTrainer(),
   ]);
   const trainer = Boolean(TRAINER_CMD);
 
-  const canTrain = colmap && trainer;
+  const canRunExternal = colmap && trainer;
   let backend;
-  if (BACKEND === 'colmap') backend = 'colmap';
-  else if (BACKEND === 'preview') backend = 'preview';
-  else backend = canTrain ? 'colmap' : 'preview';
+  if (['colmap', 'preview', 'gaussian'].includes(BACKEND)) backend = BACKEND;
+  else if (canRunExternal) backend = 'colmap';
+  else if (python.available) backend = 'gaussian';
+  else backend = 'preview';
 
   cached = {
     backend,
@@ -40,16 +73,28 @@ export async function detectCapabilities({ refresh = false } = {}) {
     gpu,
     trainer,
     trainerCmd: TRAINER_CMD,
-    reasons: explain({ colmap, trainer, gpu, ffmpeg }),
+    pythonTrainer: python.available,
+    /** True when the chosen backend produces a genuine reconstruction. */
+    reconstructs: backend !== 'preview',
+    reasons: explain({ colmap, trainer, gpu, ffmpeg, python, backend }),
   };
   return cached;
 }
 
-function explain({ colmap, trainer, gpu, ffmpeg }) {
+function explain({ colmap, trainer, gpu, ffmpeg, python, backend }) {
   const out = [];
-  if (!colmap) out.push('COLMAP was not found on PATH, so camera poses cannot be solved.');
-  if (!trainer) out.push('No trainer is configured (set SPLAT_TRAINER_CMD) to optimise gaussians.');
-  if (colmap && trainer && !gpu) out.push('No NVIDIA GPU was detected; training will be very slow.');
+  if (backend === 'gaussian') {
+    out.push('Using the bundled trainer: pycolmap solves camera poses and gaussians are optimised on the CPU.');
+    if (!gpu) out.push('No NVIDIA GPU was detected, so training runs on the CPU and is slow but real.');
+  }
+  if (backend === 'preview') {
+    if (!python.available) out.push(`The bundled trainer is unavailable: ${python.reason}.`);
+    if (!colmap) out.push('COLMAP was not found on PATH.');
+    if (!trainer) out.push('No external trainer is configured (SPLAT_TRAINER_CMD).');
+  }
+  if (backend === 'colmap' && !gpu) {
+    out.push('No NVIDIA GPU was detected; the configured trainer may be very slow.');
+  }
   if (!ffmpeg) out.push('ffmpeg was not found; video frames are extracted in the browser instead.');
   return out;
 }

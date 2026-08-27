@@ -46,12 +46,18 @@ function paintBackendBadge(caps) {
     return;
   }
   badge.dataset.backend = caps.backend;
-  badge.querySelector('.label').textContent = caps.backend === 'colmap'
-    ? 'COLMAP + trainer'
-    : 'preview backend';
-  badge.title = caps.backend === 'colmap'
-    ? 'Full reconstruction: COLMAP solves camera poses and a trainer optimises the gaussians.'
-    : `Preview reconstruction. ${(caps.reasons || []).join(' ')}`;
+  const LABELS = {
+    colmap: 'COLMAP + trainer',
+    gaussian: 'full reconstruction',
+    preview: 'preview backend',
+  };
+  const TITLES = {
+    colmap: 'Full reconstruction: COLMAP solves camera poses and the configured trainer optimises the gaussians.',
+    gaussian: 'Full reconstruction: pycolmap solves camera poses and gaussians are optimised against your photos on the CPU.',
+    preview: 'Preview reconstruction \u2014 a fast proxy, not structure-from-motion.',
+  };
+  badge.querySelector('.label').textContent = LABELS[caps.backend] || caps.backend;
+  badge.title = `${TITLES[caps.backend] || ''} ${(caps.reasons || []).join(' ')}`.trim();
 }
 
 /** An asset changed on the server: refresh the cache and the mounted view. */

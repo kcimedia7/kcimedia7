@@ -7,6 +7,7 @@ import { encodeSplatBuffer, boundsOf } from './splat.js';
 import { reconstructPreview } from './preview.js';
 import { detectCapabilities } from './backends.js';
 import { runColmap, runTrainer } from './colmap.js';
+import { runGaussianTraining } from './gaussian.js';
 import { PREVIEW_MAX_FRAMES, PREVIEW_GRID } from '../config.js';
 
 /**
@@ -24,6 +25,13 @@ const PLANS = {
     { id: 'poses', label: 'Solving camera poses (COLMAP)', weight: 0.34 },
     { id: 'train', label: 'Training gaussians', weight: 0.48 },
     { id: 'export', label: 'Writing splat files', weight: 0.12 },
+  ],
+  // The bundled trainer reports its own phases, so pose solving and gaussian
+  // optimisation share one stage whose fraction comes from the trainer itself.
+  gaussian: [
+    { id: 'ingest', label: 'Reading frames', weight: 0.04 },
+    { id: 'train', label: 'Reconstructing', weight: 0.88 },
+    { id: 'export', label: 'Writing splat files', weight: 0.08 },
   ],
 };
 
@@ -64,7 +72,32 @@ export async function convert(ctx) {
   let cloud;
   let stats;
 
-  if (backend === 'colmap') {
+  if (backend === 'gaussian') {
+    progress.done('ingest');
+    progress.enter('train');
+    const { plyPath, report } = await runGaussianTraining({
+      imagesDir: ctx.framesDir,
+      workDir: ctx.workDir,
+      outputDir: path.join(ctx.workDir, 'train'),
+      settings: ctx.settings,
+      log,
+      onProgress: (update) => progress.within('train', update.fraction, update.label),
+      signal: ctx.signal,
+    });
+    cloud = decodePly(await fsp.readFile(plyPath));
+    stats = {
+      frames: framePaths.length,
+      splats: cloud.count,
+      iterations: report?.iterations,
+      registeredViews: report?.registered_views,
+      psnr: report?.psnr,
+      trainSeconds: report?.train_seconds,
+      sfmSeconds: report?.sfm_seconds,
+      trainResolution: report?.resolution,
+    };
+    if (report?.psnr) log(`reconstruction quality: ${report.psnr.toFixed(2)} dB PSNR`);
+    progress.done('train');
+  } else if (backend === 'colmap') {
     progress.done('ingest');
     progress.enter('poses');
     const matcher = ctx.settings.matcher || (ctx.settings.kind === 'video' ? 'sequential' : 'exhaustive');
@@ -209,10 +242,10 @@ function stageProgress(plan, emit) {
       localFraction = 0;
       push();
     },
-    within(id, fraction) {
+    within(id, fraction, message) {
       if (current().id !== id) return;
       localFraction = Math.max(localFraction, Math.min(1, fraction));
-      push();
+      push(message);
     },
     /** Asymptotic creep: each log line closes part of the remaining gap. */
     nudge() {

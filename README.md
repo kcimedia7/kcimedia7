@@ -30,43 +30,65 @@ node server/index.js     # http://127.0.0.1:8787
 
 ---
 
-## The two backends
+## The three backends
 
-Real gaussian splatting needs structure-from-motion to recover camera poses and
-a CUDA trainer to optimise the gaussians. Both are large external installs, so
-SplatWorks detects them rather than bundling them.
+A real 3D Gaussian Splat needs two things: structure-from-motion to recover
+where each photo was taken, then gradient-descent optimisation of the gaussians
+against those posed photos. SplatWorks detects what the machine can do and picks
+the best available route.
 
-| | `colmap` backend | `preview` backend |
-|---|---|---|
-| Needs | COLMAP + a 3DGS trainer + GPU | nothing |
-| Camera poses | solved from the images | **assumed** (turntable orbit) |
-| Time | minutes to hours | about a second |
-| Output | a true reconstruction | a fast proxy |
+| | `colmap` | `gaussian` | `preview` |
+|---|---|---|---|
+| Needs | COLMAP binary + a CUDA trainer | `pip install -r trainer/requirements.txt` | nothing |
+| Camera poses | solved (COLMAP) | solved (pycolmap) | **assumed** |
+| Gaussians | optimised on GPU | optimised on CPU | not optimised |
+| Output | a true reconstruction | a true reconstruction | a fast proxy |
+| Time | minutes | minutes to hours | about a second |
 
-The badge in the top-right of the UI always tells you which one is active, and
-the "New conversion" page says so plainly before you convert anything.
+The first two are the same algorithm at different speeds. `preview` is a
+different thing entirely, and the UI says so rather than letting you assume
+otherwise.
 
-### What the preview backend actually does
+### The bundled trainer
 
-It is **not** structure-from-motion, and it is labelled that way throughout the
-app. Since it cannot recover camera poses, it assumes the capture pattern the UI
-asks you to shoot — an orbit around a subject — and for each frame:
+`trainer/` is a complete 3D Gaussian Splatting implementation that needs no GPU
+and no system installs -- two pip wheels and it runs:
 
-- estimates a depth field from three cheap monocular cues: how far each pixel's
-  colour sits from the backdrop colour, local gradient energy (in-focus reads as
-  nearer), and a mild centre bias;
-- back-projects the pixels through that frame's assumed camera into oriented
-  gaussian discs facing it;
-- merges every frame's relief into one cloud and normalises it.
+```bash
+pip install -r trainer/requirements.txt
+```
 
-The result is a real, editable, exportable gaussian cloud built from your own
-pixels that looks like your subject from the angles you shot it. It is a proxy
-for review and framing, not a metrically accurate reconstruction. Use it to see
-the shape of a capture in a second; re-run the same capture through the COLMAP
-backend when you want the real thing — the original files are kept for exactly
-that.
+- **Poses** come from real COLMAP, via the `pycolmap` wheel.
+- **Optimisation** uses a differentiable EWA rasterizer written in PyTorch:
+  gaussians are projected to screen-space ellipses, binned into tiles, and
+  alpha-composited front to back. Autograd supplies the backward pass that the
+  reference CUDA implementation derives by hand -- and the gradients are checked
+  against finite differences in the test suite, to ~1e-7 relative error.
+- **Density control** follows the paper: clone under-reconstructed gaussians,
+  split over-reconstructed ones, prune the transparent, and periodically reset
+  opacity so floaters can be culled instead of lingering.
+- **Loss** is the paper's 0.8 x L1 + 0.2 x D-SSIM.
+- **Output** is a standard 3DGS `.ply` that any splat viewer reads.
 
-### Enabling real reconstruction
+Run it directly on a folder of images:
+
+```bash
+cd trainer
+python -m splatworks_train.train --images ./frames --output ./model \
+    --iterations 3000 --resolution 320
+```
+
+It prints per-iteration loss, PSNR and gaussian count, and writes
+`point_cloud.ply` plus a `report.json` of metrics.
+
+**On CPU this is slow.** That is the honest trade: it is the same algorithm as
+the CUDA implementation, not a cheaper approximation of it. The reference runs
+30,000 iterations on a GPU; a CPU run of a few thousand at reduced resolution
+gets you a real but softer reconstruction. Point `SPLAT_TRAINER_CMD` at a GPU
+trainer when you want the full thing.
+
+### Enabling the external GPU path
+
 
 Install [COLMAP](https://colmap.github.io/) so it is on `PATH`, install a 3DGS
 trainer, and point SplatWorks at it:
@@ -263,8 +285,11 @@ queue and an SSE stream do not fit inside a 10-second Lambda.
 
 ## Limitations worth knowing
 
-- The preview backend assumes an orbit and cannot recover true geometry. It says
-  so in the UI; do not treat its output as measurement.
+- The preview backend, used only when neither trainer is available, assumes an
+  orbit and cannot recover true geometry. It says so in the UI.
+- The bundled trainer optimises degree-0 spherical harmonics, so colour is
+  view-independent: no specular highlights that change with the viewing angle.
+  The geometry is real anisotropic 3D gaussians either way.
 - The viewer evaluates spherical harmonics at degree 0. Higher-order terms in an
   imported `.ply` are parsed but not rendered, so view-dependent highlights from
   a trained model appear flat. Exports are written in the degree-0 form, which

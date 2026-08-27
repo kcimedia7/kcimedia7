@@ -1,0 +1,13 @@
+# The bundled trainer needs exactly two wheels; both install without a GPU,
+# a compiler, or a system COLMAP.
+#
+#   pycolmap  real COLMAP structure-from-motion, as a prebuilt wheel
+#   torch     autograd for the differentiable rasterizer (CPU build is fine)
+#
+# For a CPU-only install that skips the CUDA payload:
+#   pip install pycolmap
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+pycolmap>=3.10
+torch>=2.2
+numpy>=1.24
+pillow>=10.0
