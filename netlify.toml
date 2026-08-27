@@ -1,0 +1,37 @@
+# Netlify hosts the standalone build: one self-contained page that runs the
+# whole preview pipeline client-side. There are no functions and no origin
+# server, because in this mode the app genuinely does not need one -- frames are
+# decoded by the browser, reconstruction runs on the page, and the library lives
+# in the visitor's own IndexedDB.
+#
+# The server app (real COLMAP pose solving, shared library, large uploads) does
+# not fit Netlify's function limits; see docs/DEPLOY.md for that path.
+
+[build]
+  command = "node tools/build-demo.mjs"
+  publish = "dist"
+
+[build.environment]
+  NODE_VERSION = "22"
+
+# The page is one file with everything inlined, so the policy can stay tight.
+# Each exception below is load-bearing:
+#   'unsafe-inline' script  the module script is inlined into the page
+#   blob: worker            the depth sorter is built from a blob URL
+#   blob: media             video files are read through URL.createObjectURL
+#   data:/blob: img         library thumbnails are data URLs
+#   googleapis/gstatic      the only external host the page contacts, for fonts
+[[headers]]
+  for = "/*"
+  [headers.values]
+    Content-Security-Policy = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; media-src blob:; worker-src blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'"
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+    Permissions-Policy = "camera=(), microphone=(), geolocation=(), interest-cohort=()"
+    Cross-Origin-Opener-Policy = "same-origin"
+
+# One file per deploy, so revalidate rather than serving a stale app.
+[[headers]]
+  for = "/index.html"
+  [headers.values]
+    Cache-Control = "public, max-age=0, must-revalidate"

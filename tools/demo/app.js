@@ -303,6 +303,7 @@ async function show(record) {
   $('#title').textContent = record.name;
   $('#subtitle').textContent = `${count.toLocaleString()} gaussians \u00b7 ${record.frames} frames \u00b7 ${record.kind === 'video' ? 'video' : 'photos'}`;
   renderEdit();
+  refreshSaveButtons();
   startStats();
 }
 
@@ -552,23 +553,97 @@ function renderLibrary() {
   }
 }
 
-// ------------------------------------------------------------------- snapshot
+// -------------------------------------------------------------------- saving
 
-let downloads = null;
-window.claude?.use?.('downloads').then((d) => {
-  downloads = d;
-  $('#snapshot').hidden = !d;
-}).catch(() => {});
+/**
+ * The page runs in two homes and they hand a finished file to the viewer in
+ * different ways.
+ *
+ * Hosted normally (Netlify, or any static host) a blob download works, so every
+ * format is on offer. Embedded as a Claude artifact the frame cannot start its
+ * own download and has to ask the host, whose allowlist covers images but not
+ * .ply or .splat -- so there, only the snapshot is offered. Detect once, and
+ * let the UI reflect what this copy can actually do rather than presenting a
+ * button that silently fails.
+ */
+const embedded = Boolean(window.claude?.use);
+let hostDownloads = null;
+
+if (embedded) {
+  window.claude.use('downloads').then((d) => {
+    hostDownloads = d;
+    refreshSaveButtons();
+  }).catch(() => refreshSaveButtons());
+}
+
+function canSave() {
+  return embedded ? Boolean(hostDownloads) : true;
+}
+
+function refreshSaveButtons() {
+  const ready = Boolean(state.current);
+  $('#snapshot').hidden = !canSave();
+  $('#export-ply').hidden = embedded;
+  $('#export-splat').hidden = embedded;
+  $('#export-note').hidden = !embedded;
+  for (const id of ['#export-ply', '#export-splat']) {
+    const button = $(id);
+    if (button) button.disabled = !ready;
+  }
+}
+
+/** Hand `data` to the viewer by whichever route this copy of the page has. */
+async function offerFile(filename, data, mime) {
+  if (embedded) {
+    if (!hostDownloads) return;
+    await hostDownloads.save({ filename, data });
+    return;
+  }
+  const blob = data instanceof Blob ? data : new Blob([data], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  // Revoke on the next tick: revoking synchronously can race the download.
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
+
+function baseName() {
+  return (state.current?.name || 'splat').replace(/[^\w.-]+/g, '_').slice(0, 60) || 'splat';
+}
 
 async function snapshot() {
-  if (!state.viewer || !downloads) return;
-  const dataUrl = state.viewer.snapshot();
-  const blob = await (await fetch(dataUrl)).blob();
-  const name = `${(state.current?.name || 'splat').replace(/[^\w.-]+/g, '_')}.png`;
+  if (!state.viewer || !canSave()) return;
   try {
-    await downloads.save({ filename: name, data: blob });
+    const blob = await state.viewer.snapshotBlob();
+    await offerFile(`${baseName()}.png`, blob, 'image/png');
   } catch (err) {
     if (err?.code !== 'declined') toast('That snapshot could not be saved.', 'error');
+  }
+}
+
+/**
+ * Export with the current edits baked in, exactly as the server app does: the
+ * stored cloud is never modified, so the edits stay adjustable afterwards.
+ */
+async function exportCloud(format) {
+  if (!state.current) return;
+  try {
+    const cloud = applyEdits(decodeSplatBuffer(new Uint8Array(state.current.buffer)), state.edits);
+    if (!cloud.count) {
+      toast('Nothing to export -- the crop or opacity cutoff removed every gaussian.', 'error', 6000);
+      return;
+    }
+    const bytes = format === 'ply'
+      ? encodePly(cloud)
+      : new Uint8Array(encodeSplatBuffer(cloud));
+    await offerFile(`${baseName()}.${format}`, bytes, 'application/octet-stream');
+    toast(`Exported ${cloud.count.toLocaleString()} gaussians as .${format}`, 'ok');
+  } catch (err) {
+    toast(`Export failed: ${err.message}`, 'error', 6000);
   }
 }
 
@@ -620,6 +695,8 @@ function wire() {
     e.target.classList.toggle('on', state.viewer.camera.autoRotate);
   });
   $('#snapshot').addEventListener('click', snapshot);
+  $('#export-ply').addEventListener('click', () => exportCloud('ply'));
+  $('#export-splat').addEventListener('click', () => exportCloud('splat'));
 
   $('#dismiss').addEventListener('click', () => {
     $('#note').hidden = true;
@@ -631,6 +708,7 @@ async function boot() {
   wire();
   setTab('convert');
   renderEdit();
+  refreshSaveButtons();
   try {
     if (localStorage.getItem('splatworks-note')) $('#note').hidden = true;
   } catch { /* private window: just show the note */ }

@@ -465,6 +465,12 @@ select {
 }
 .btn.primary:hover:not(:disabled) { background: var(--violet-hi); }
 
+.row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
 .btn.tool {
   font-size: 12px;
   padding: 5px 10px;
@@ -720,6 +726,22 @@ select {
         </label>
         <p class="hint">
           Tell it how far you actually moved and the per-frame reliefs line up better.
+        </p>
+      </section>
+
+      <section class="group">
+        <h3>Export</h3>
+        <div class="row">
+          <button class="btn" id="export-ply" disabled>Download .ply</button>
+          <button class="btn" id="export-splat" disabled>Download .splat</button>
+        </div>
+        <p class="hint" id="export-note" hidden>
+          Saving a splat file isn&rsquo;t available inside the embedded viewer.
+          Open the hosted copy or run the local app to export.
+        </p>
+        <p class="hint">
+          Exports have your edits baked in. The <code>.ply</code> is the standard
+          3D Gaussian Splatting format that other viewers and tools read.
         </p>
       </section>
 

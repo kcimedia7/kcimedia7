@@ -14,7 +14,12 @@
  *     happen to use the same name (they no longer have separate scopes)
  *   - the sort worker is embedded as a blob URL instead of a module URL
  *
- * Usage: node tools/build-demo.mjs [outfile]
+ * Usage:
+ *   node tools/build-demo.mjs                 # both targets
+ *   node tools/build-demo.mjs --out FILE      # one file, default (web) target
+ *
+ * Targets differ only in where the page can put a finished file, which the page
+ * detects at runtime -- the bundle itself is identical.
  */
 
 import fs from 'node:fs';
@@ -22,7 +27,20 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const out = process.argv[2] || path.join(ROOT, 'tools', 'demo', 'build', 'splatworks-demo.html');
+const argv = process.argv.slice(2);
+const outFlag = argv.indexOf('--out');
+const explicitOut = outFlag !== -1 ? argv[outFlag + 1] : argv.find((a) => !a.startsWith('--'));
+
+/**
+ * `dist/` is what Netlify publishes; the second copy is the file published as
+ * a Claude artifact. Same bytes, two homes.
+ */
+const TARGETS = explicitOut
+  ? [path.resolve(explicitOut)]
+  : [
+    path.join(ROOT, 'dist', 'index.html'),
+    path.join(ROOT, 'tools', 'demo', 'build', 'splatworks-demo.html'),
+  ];
 
 const read = (p) => fs.readFileSync(path.join(ROOT, p), 'utf8');
 
@@ -68,6 +86,21 @@ const preview = patch(flatten(read('server/pipeline/preview.js')), [
   ['right = normalize(right);', 'right = pvNormalize(right);'],
 ], 'preview.js');
 
+// --- PLY writer and the edit engine (export path) ----------------------------
+const ply = patch(flatten(read('server/pipeline/ply.js')), [
+  // edits.js declares its own clamp01, and both land in one scope here.
+  ['function clamp01(v) {', 'function plyClamp01(v) {'],
+  ['clamp01(shToColor(', 'plyClamp01(shToColor('],
+  // Node Buffer -> plain bytes. The header is ASCII, so the encoding is a wash.
+  ["const headerBuf = Buffer.from(header, 'latin1');", 'const headerBuf = new TextEncoder().encode(header);'],
+  ['const body = Buffer.allocUnsafe(cloud.count * stride);', 'const body = new Uint8Array(cloud.count * stride);'],
+  ['return Buffer.concat([headerBuf, body]);', 'return concatBytes(headerBuf, body);'],
+], 'ply.js');
+
+// edits.js imports defaultEdits from the server's store; flatten() drops that
+// import and the app shell supplies its own (hoisted) definition.
+const edits = flatten(read('server/edits.js'));
+
 // --- viewer ------------------------------------------------------------------
 const mat = flatten(read('web/js/viewer/mat.js'));
 const camera = flatten(read('web/js/viewer/camera.js'));
@@ -90,6 +123,13 @@ const bundle = [
   '// ---- server/pipeline/splat.js ----', splat,
   '// ---- server/pipeline/imageops.js ----', imageops,
   '// ---- server/pipeline/preview.js ----', preview,
+  '// ---- server/pipeline/ply.js ----', ply,
+  '// ---- server/edits.js ----', edits,
+  'function concatBytes(a, b) {',
+  '  const out = new Uint8Array(a.length + b.length);',
+  '  out.set(a, 0); out.set(b, a.length);',
+  '  return out;',
+  '}',
   '// ---- web/js/viewer/mat.js ----', mat,
   '// ---- web/js/viewer/camera.js ----', camera,
   '// ---- web/js/viewer/shaders.js ----', shaders,
@@ -130,8 +170,10 @@ const html = read('tools/demo/shell.html')
 
 toAscii(html, 'page');   // the markup is entity-encoded; this proves it
 
-fs.mkdirSync(path.dirname(out), { recursive: true });
-fs.writeFileSync(out, html);
-
 const kb = (n) => `${(n / 1024).toFixed(1)} KB`;
-console.log(`wrote ${path.relative(ROOT, out)} (${kb(html.length)}, bundle ${kb(bundle.length)})`);
+for (const target of TARGETS) {
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(target, html);
+  console.log(`wrote ${path.relative(ROOT, target)} (${kb(html.length)})`);
+}
+console.log(`bundle ${kb(bundle.length)}`);

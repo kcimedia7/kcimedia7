@@ -235,6 +235,16 @@ export class SplatViewer {
     return this.canvas.toDataURL('image/png');
   }
 
+  /**
+   * PNG Blob of the current view. Preferred over `snapshot()` where the result
+   * is handed to a download or an upload, since it avoids a base64 round trip
+   * (and the `data:` fetch that would otherwise need a CSP exception).
+   */
+  snapshotBlob() {
+    this._frame();
+    return new Promise((resolve) => this.canvas.toBlob(resolve, 'image/png'));
+  }
+
   _frame() {
     const gl = this.gl;
     const now = performance.now();

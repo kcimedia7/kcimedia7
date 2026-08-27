@@ -220,14 +220,16 @@ export → duplicate → delete.
 
 ---
 
-## The hosted browser demo
+## The standalone build
 
 `tools/build-demo.mjs` bundles the reconstruction and the renderer into one
 self-contained HTML file that runs the whole preview pipeline client-side — no
-server, nothing uploaded, conversions kept in IndexedDB on the viewer's device:
+server, nothing uploaded, conversions kept in IndexedDB on the viewer's device,
+and `.ply` / `.splat` / PNG exported straight to disk:
 
 ```bash
-node tools/build-demo.mjs          # -> tools/demo/build/splatworks-demo.html
+node tools/build-demo.mjs     # -> dist/index.html (+ a copy for embedding)
+open dist/index.html          # no server required
 ```
 
 The build inlines the real modules from `server/pipeline/` and `web/js/viewer/`
@@ -238,8 +240,26 @@ URL, and a few module-private helpers are renamed where merging scopes would
 collide. The output is asserted to be pure ASCII, because an embedded page
 can't declare its own charset.
 
-The demo covers converting, viewing, editing and the library. It cannot do
-COLMAP pose solving or `.ply`/`.splat` export — both of those are the local app.
+It covers converting, viewing, editing, the library and export. The one thing
+it cannot do is COLMAP pose solving, which needs a GPU host — that is the server
+app's job.
+
+`dist/` is what Netlify publishes; the second copy is the page published as a
+Claude artifact, where the sandbox blocks page-initiated downloads. The build is
+identical and the page detects at runtime which home it is in, offering the
+export buttons only where they can actually work.
+
+## Deploying
+
+```bash
+netlify deploy --build --prod    # the standalone build; netlify.toml is committed
+docker build -t splatworks . && docker run -p 80:8787 -v splatworks-data:/data splatworks
+```
+
+Netlify hosts the standalone build, AWS hosts the server app, and
+[docs/DEPLOY.md](docs/DEPLOY.md) explains why that split is the right one — the
+short version being that multi-gigabyte uploads, a persistent library, a job
+queue and an SSE stream do not fit inside a 10-second Lambda.
 
 ## Limitations worth knowing
 
