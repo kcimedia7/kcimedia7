@@ -1,4 +1,41 @@
-# Running Claude Code projects on one host
+# Running Claude Code projects
+
+Two modes, because a laptop and a public server want opposite things.
+
+| | `claude-local` | `claude-projects` |
+|---|---|---|
+| For | the computer you work on | a server with a public IP |
+| Needs | Node. That is all. | root, systemd, a domain |
+| Root | no | yes |
+| Ports | each project on its own, opened directly | one proxy on 80/443 |
+| TLS | none needed (loopback) | automatic, via Caddy |
+| OS | macOS, Linux, WSL | Linux with systemd |
+
+**On your own machine, use `claude-local`** -- it is one Node file with no
+dependencies and asks for no root, no domain and no certificates:
+
+```bash
+node ops/local/claude-local.mjs doctor          # what this machine can do
+node ops/local/claude-local.mjs add splatworks --dir . --health /api/health
+node ops/local/claude-local.mjs up              # dashboard on :7777
+```
+
+`up` starts every registered project, restarts anything that crashes (with
+backoff), and serves a dashboard listing them with live health. `down` stops
+the lot. `autostart` writes a systemd user unit on Linux or a launchd agent on
+macOS so it comes back after a reboot.
+
+Each project keeps **its own port and is opened directly** rather than being
+proxied under a path prefix, because prefix-proxying breaks any app that uses
+absolute URLs -- which includes this one. Everything binds to `127.0.0.1`, so
+nothing is exposed to the network you happen to be on.
+
+Logs land in `~/.claude-projects/logs/<name>.log`; state is a single
+`projects.json` beside them.
+
+---
+
+# The server mode
 
 Turns a Linux box into a server that runs several projects side by side, each
 with its own service, logs, restarts and HTTPS route.
@@ -76,7 +113,8 @@ identity proxy in front of it -- do not rely on the URL being unguessed.
 ## Tests
 
 ```bash
-./ops/tests/test_ops.sh
+./ops/tests/test_ops.sh    # server mode
+npm test                   # includes the claude-local tests
 ```
 
 39 checks over the parts that are pure logic: name validation, project-type
