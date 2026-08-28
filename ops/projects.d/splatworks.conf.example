@@ -1,0 +1,21 @@
+# Example: this project, served on its own hostname.
+# Copy to /etc/claude-projects/splatworks.conf, or let `claude-projects add`
+# write it for you:
+#
+#   claude-projects add splatworks \
+#     --repo https://github.com/kcimedia7/kcimedia7 \
+#     --branch claude/gaussian-splat-converter-pnx7mg \
+#     --domain splats.example.com
+#
+NAME=splatworks
+KIND=node
+WORKDIR=/srv/claude-projects/splatworks/src
+REPO=https://github.com/kcimedia7/kcimedia7
+BRANCH=claude/gaussian-splat-converter-pnx7mg
+PORT=8787
+START=node server/index.js
+DOMAIN=splats.example.com
+PATH_PREFIX=
+HEALTH=/api/health
+ENV_FILE=
+DATA_DIR=/srv/claude-projects/splatworks/data

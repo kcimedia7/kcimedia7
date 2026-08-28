@@ -4,10 +4,14 @@
   "private": true,
   "type": "module",
   "description": "Turn photos and videos into 3D Gaussian Splats, then view and edit them in a library.",
-  "engines": { "node": ">=22.0.0" },
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "scripts": {
     "start": "node server/index.js",
     "dev": "node --watch server/index.js",
-    "test": "node --test 'test/**/*.test.js'"
+    "test": "node --test 'test/**/*.test.js'",
+    "test:ops": "./ops/tests/test_ops.sh",
+    "test:all": "npm test && npm run test:ops"
   }
 }

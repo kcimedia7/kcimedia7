@@ -1,0 +1,43 @@
+# Template unit: one instance per project, named after its config file.
+#   systemctl start claude-project@splatworks
+[Unit]
+Description=claude-projects: %i
+Documentation=file:/etc/claude-projects/%i.conf
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=claudeapps
+Group=claudeapps
+ExecStart=/usr/local/lib/claude-projects/run.sh %i
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=20
+KillMode=mixed
+
+# Logs go to the journal, so `claude-projects logs <name>` works uniformly.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=claude-%i
+
+# These apps serve untrusted uploads, so give them only what they need. A
+# project that legitimately needs more can override with a drop-in:
+#   systemctl edit claude-project@<name>
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+ReadWritePaths=/srv/claude-projects
+
+[Install]
+WantedBy=multi-user.target

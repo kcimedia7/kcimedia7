@@ -1,0 +1,358 @@
+#!/usr/bin/env bash
+# claude-projects -- run several projects on one host.
+#
+# Each project is one small config file in /etc/claude-projects. From those this
+# generates a systemd service and a reverse-proxy route, so adding a project is
+# a single command and every project gets restarts, logs and TLS for free.
+
+LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" 2>/dev/null && pwd)"
+# shellcheck source=../lib/common.sh
+. "${OPS_LIB:-$LIB_DIR}/common.sh"
+
+usage() {
+  cat <<'USAGE'
+claude-projects <command>
+
+  add <name> [options]     register a project and start it
+  list                     one line per project
+  show <name>              full configuration
+  deploy <name>            pull, build and restart
+  start|stop|restart <name>
+  logs <name> [-f]         journal for the project
+  status                   health of every project
+  remove <name> [--purge]  unregister (--purge also deletes files)
+  render                   regenerate systemd units and the proxy config
+  doctor                   check the host setup
+
+add options:
+  --repo URL         git remote to clone
+  --branch NAME      branch to track (default: the remote's default)
+  --dir PATH         use an existing checkout instead of cloning
+  --port N           port the app listens on (default: next free)
+  --kind KIND        node | python | docker | static (default: detected)
+  --start "CMD"      command to run (default: from kind)
+  --domain HOST      serve on its own hostname, with automatic TLS
+  --path /PREFIX     serve under the default site at this path
+  --health PATH      URL path that returns 200 when healthy (default: /)
+  --env FILE         extra environment file to load
+USAGE
+}
+
+cmd_add() {
+  local name="${1:-}"; shift || true
+  valid_name "$name" || die "project name must be lowercase letters, digits and dashes"
+  project_exists "$name" && die "project '$name' already exists"
+
+  local repo="" branch="" dir="" port="" kind="" start="" domain="" pathpfx="" health="/" envfile=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --repo)   repo="$2"; shift 2 ;;
+      --branch) branch="$2"; shift 2 ;;
+      --dir)    dir="$2"; shift 2 ;;
+      --port)   port="$2"; shift 2 ;;
+      --kind)   kind="$2"; shift 2 ;;
+      --start)  start="$2"; shift 2 ;;
+      --domain) domain="$2"; shift 2 ;;
+      --path)   pathpfx="$2"; shift 2 ;;
+      --health) health="$2"; shift 2 ;;
+      --env)    envfile="$2"; shift 2 ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+
+  [ -n "$repo" ] || [ -n "$dir" ] || die "give either --repo or --dir"
+
+  local workdir="${dir:-$OPS_SRV/$name/src}"
+  if [ -n "$repo" ] && [ ! -d "$workdir/.git" ]; then
+    info "cloning $repo"
+    mkdir -p "$(dirname "$workdir")"
+    if [ -n "$branch" ]; then
+      git clone --branch "$branch" "$repo" "$workdir"
+    else
+      git clone "$repo" "$workdir"
+    fi
+  fi
+  [ -d "$workdir" ] || die "no checkout at $workdir"
+
+  [ -n "$kind" ]  || kind="$(detect_kind "$workdir")"
+  [ -n "$start" ] || start="$(default_start_command "$kind" "$workdir")"
+  [ -n "$port" ]  || port="$(next_free_port)"
+  [ -n "$pathpfx" ] || [ -n "$domain" ] || pathpfx="/$name"
+
+  if [ "$kind" != "static" ] && [ -z "$start" ]; then
+    die "could not work out how to start '$name'; pass --start \"...\""
+  fi
+
+  mkdir -p "$OPS_ROOT" "$OPS_SRV/$name/data"
+  cat > "$(project_conf "$name")" <<CONF
+# claude-projects: $name
+NAME=$name
+KIND=$kind
+WORKDIR=$workdir
+REPO=$repo
+BRANCH=$branch
+PORT=$port
+START=$start
+DOMAIN=$domain
+PATH_PREFIX=$pathpfx
+HEALTH=$health
+ENV_FILE=$envfile
+DATA_DIR=$OPS_SRV/$name/data
+CONF
+
+  info "registered '$name' ($kind) on port $port"
+  cmd_render
+  if have_systemd; then
+    systemctl enable --now "claude-project@$name" 2>/dev/null || \
+      warn "could not start claude-project@$name; check: journalctl -u claude-project@$name"
+  fi
+  cmd_show "$name"
+}
+
+cmd_list() {
+  local any=0
+  printf '%-20s %-8s %-7s %-28s %s\n' NAME KIND PORT ROUTE STATE
+  for name in $(list_projects); do
+    any=1
+    local domain pathpfx route state
+    domain="$(conf_get "$name" DOMAIN)"
+    pathpfx="$(conf_get "$name" PATH_PREFIX)"
+    route="${domain:-${pathpfx:-/}}"
+    state="$(unit_state "$name")"
+    printf '%-20s %-8s %-7s %-28s %s\n' \
+      "$name" "$(conf_get "$name" KIND)" "$(conf_get "$name" PORT)" "$route" "$state"
+  done
+  [ "$any" -eq 1 ] || log "${DIM}no projects registered yet${RESET}"
+}
+
+cmd_show() {
+  local name="${1:?project name required}"
+  project_exists "$name" || die "no such project: $name"
+  log "${DIM}$(project_conf "$name")${RESET}"
+  grep -v '^#' "$(project_conf "$name")" | sed '/^$/d'
+}
+
+cmd_deploy() {
+  local name="${1:?project name required}"
+  project_exists "$name" || die "no such project: $name"
+  local dir kind branch
+  dir="$(conf_get "$name" WORKDIR)"
+  kind="$(conf_get "$name" KIND)"
+  branch="$(conf_get "$name" BRANCH)"
+
+  if [ -d "$dir/.git" ]; then
+    info "updating $name"
+    git -C "$dir" fetch --prune origin
+    if [ -n "$branch" ]; then
+      git -C "$dir" checkout "$branch"
+      git -C "$dir" reset --hard "origin/$branch"
+    else
+      git -C "$dir" pull --ff-only
+    fi
+  fi
+
+  case "$kind" in
+    node)
+      if [ -f "$dir/package-lock.json" ]; then (cd "$dir" && npm ci --omit=dev)
+      elif [ -f "$dir/package.json" ]; then (cd "$dir" && npm install --omit=dev); fi
+      if [ -f "$dir/package.json" ] && grep -q '"build"' "$dir/package.json"; then
+        (cd "$dir" && npm run build)
+      fi
+      ;;
+    python)
+      [ -d "$dir/.venv" ] || python3 -m venv "$dir/.venv"
+      [ -f "$dir/requirements.txt" ] && "$dir/.venv/bin/pip" install -q -r "$dir/requirements.txt"
+      ;;
+    docker)
+      (cd "$dir" && docker compose pull && docker compose build)
+      ;;
+  esac
+
+  cmd_render
+  cmd_restart "$name"
+  info "deployed $name"
+}
+
+cmd_start()   { systemd_do start   "${1:?project name required}"; }
+cmd_stop()    { systemd_do stop    "${1:?project name required}"; }
+cmd_restart() { systemd_do restart "${1:?project name required}"; }
+
+systemd_do() {
+  local action="$1" name="$2"
+  project_exists "$name" || die "no such project: $name"
+  [ "$(conf_get "$name" KIND)" = "static" ] && { info "$name is static; nothing to $action"; return 0; }
+  have_systemd || { warn "systemd is not available here; would $action claude-project@$name"; return 0; }
+  systemctl "$action" "claude-project@$name"
+}
+
+cmd_logs() {
+  local name="${1:?project name required}"; shift || true
+  have_systemd || die "systemd is not available here"
+  journalctl -u "claude-project@$name" -n 200 "$@"
+}
+
+cmd_status() {
+  printf '%-20s %-10s %-7s %s\n' NAME STATE PORT HEALTH
+  for name in $(list_projects); do
+    local port health url code
+    port="$(conf_get "$name" PORT)"
+    health="$(conf_get "$name" HEALTH /)"
+    code="n/a"
+    if [ "$(conf_get "$name" KIND)" != "static" ] && command -v curl >/dev/null 2>&1; then
+      url="http://127.0.0.1:${port}${health}"
+      code="$(curl -s -o /dev/null -m 4 -w '%{http_code}' "$url" 2>/dev/null || echo "---")"
+    fi
+    printf '%-20s %-10s %-7s %s\n' "$name" "$(unit_state "$name")" "$port" "$code"
+  done
+}
+
+cmd_remove() {
+  local name="${1:?project name required}" purge=0
+  [ "${2:-}" = "--purge" ] && purge=1
+  project_exists "$name" || die "no such project: $name"
+  if have_systemd; then
+    systemctl disable --now "claude-project@$name" 2>/dev/null || true
+  fi
+  rm -f "$(project_conf "$name")"
+  if [ "$purge" -eq 1 ]; then
+    rm -rf "${OPS_SRV:?}/$name"
+    info "removed $name and deleted its files"
+  else
+    info "removed $name (files kept in $OPS_SRV/$name)"
+  fi
+  cmd_render
+}
+
+# Regenerate everything derived from the registry. Safe to run at any time.
+cmd_render() {
+  mkdir -p "$OPS_ROOT"
+  render_caddyfile
+  if have_systemd; then
+    systemctl daemon-reload
+    command -v caddy >/dev/null 2>&1 && systemctl reload caddy 2>/dev/null || true
+  fi
+}
+
+render_caddyfile() {
+  local out="$OPS_CADDY_FILE" tmp
+  [ -d "$(dirname "$out")" ] || { warn "no $(dirname "$out"); skipping proxy config"; return 0; }
+  tmp="$(mktemp)"
+  {
+    echo "# Generated by claude-projects. Edits here are overwritten."
+    echo "# Regenerate with: claude-projects render"
+    echo
+    local default_host="${OPS_DEFAULT_HOST:-:80}"
+    local has_paths=0 name
+
+    for name in $(list_projects); do
+      [ -n "$(conf_get "$name" DOMAIN)" ] && continue
+      has_paths=1
+    done
+
+    if [ "$has_paths" -eq 1 ]; then
+      echo "$default_host {"
+      for name in $(list_projects); do
+        local domain prefix port kind dir
+        domain="$(conf_get "$name" DOMAIN)"
+        [ -n "$domain" ] && continue
+        prefix="$(conf_get "$name" PATH_PREFIX "/$name")"
+        port="$(conf_get "$name" PORT)"
+        kind="$(conf_get "$name" KIND)"
+        dir="$(conf_get "$name" WORKDIR)"
+        echo "    # $name"
+        echo "    handle_path ${prefix}/* {"
+        if [ "$kind" = "static" ]; then
+          echo "        root * ${dir}"
+          echo "        file_server"
+        else
+          echo "        reverse_proxy 127.0.0.1:${port}"
+        fi
+        echo "    }"
+      done
+      echo "    handle {"
+      echo "        respond \"claude-projects host\" 200"
+      echo "    }"
+      echo "}"
+      echo
+    fi
+
+    for name in $(list_projects); do
+      local domain port kind dir
+      domain="$(conf_get "$name" DOMAIN)"
+      [ -n "$domain" ] || continue
+      port="$(conf_get "$name" PORT)"
+      kind="$(conf_get "$name" KIND)"
+      dir="$(conf_get "$name" WORKDIR)"
+      echo "$domain {"
+      if [ "$kind" = "static" ]; then
+        echo "    root * ${dir}"
+        echo "    file_server"
+      else
+        echo "    reverse_proxy 127.0.0.1:${port}"
+      fi
+      echo "}"
+      echo
+    done
+  } > "$tmp"
+  mv "$tmp" "$out"
+  chmod 0644 "$out"
+}
+
+cmd_doctor() {
+  local ok=0 bad=0
+  check() {
+    if eval "$2" >/dev/null 2>&1; then
+      printf '  %s%s%s %s\n' "$GREEN" "ok " "$RESET" "$1"; ok=$((ok+1))
+    else
+      printf '  %s%s%s %s\n' "$RED" "no " "$RESET" "$1"; bad=$((bad+1))
+    fi
+  }
+  log "host checks:"
+  check "systemd is running"        "systemctl is-system-running --quiet || [ \"\$(systemctl is-system-running 2>/dev/null)\" = degraded ]"
+  check "caddy is installed"        "command -v caddy"
+  check "git is installed"          "command -v git"
+  check "node is installed"         "command -v node"
+  check "python3 is installed"      "command -v python3"
+  check "registry $OPS_ROOT exists" "[ -d '$OPS_ROOT' ]"
+  check "service user $OPS_USER"    "id '$OPS_USER'"
+  check "unit template installed"   "[ -f '$OPS_SYSTEMD_DIR/claude-project@.service' ]"
+  log ""
+  log "$ok ok, $bad missing"
+  [ "$bad" -eq 0 ]
+}
+
+have_systemd() {
+  command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]
+}
+
+unit_state() {
+  local name="$1"
+  [ "$(conf_get "$name" KIND)" = "static" ] && { printf 'static\n'; return; }
+  if have_systemd; then
+    systemctl is-active "claude-project@$name" 2>/dev/null || printf 'inactive\n'
+  else
+    printf 'unmanaged\n'
+  fi
+}
+
+main() {
+  local cmd="${1:-}"; shift || true
+  case "$cmd" in
+    add)     cmd_add "$@" ;;
+    list|ls) cmd_list "$@" ;;
+    show)    cmd_show "$@" ;;
+    deploy)  cmd_deploy "$@" ;;
+    start)   cmd_start "$@" ;;
+    stop)    cmd_stop "$@" ;;
+    restart) cmd_restart "$@" ;;
+    logs)    cmd_logs "$@" ;;
+    status)  cmd_status "$@" ;;
+    remove|rm) cmd_remove "$@" ;;
+    render)  cmd_render "$@" ;;
+    doctor)  cmd_doctor "$@" ;;
+    ''|-h|--help|help) usage ;;
+    *) usage; exit 1 ;;
+  esac
+}
+
+main "$@"
