@@ -177,3 +177,33 @@ test('up starts a project and down leaves nothing running', async () => {
     try { up.kill('SIGKILL'); } catch { /* already gone */ }
   }
 });
+
+test('GPU capability is judged, not just presence', async () => {
+  const { classifyGpu } = await import('../ops/local/claude-local.mjs');
+
+  // The card that prompted this: reports fine to nvidia-smi, runs none of it.
+  for (const cap of [null, '2.1']) {
+    const fermi = classifyGpu('NVIDIA GeForce GTX 560 Ti', cap);
+    assert.equal(fermi.usable, false);
+    assert.equal(fermi.cap, 2.1);
+    assert.match(fermi.reason, /Fermi/);
+  }
+
+  // Pascal and Maxwell are also below current PyTorch wheels.
+  assert.equal(classifyGpu('NVIDIA GeForce GTX 1080 Ti').usable, false);
+  assert.equal(classifyGpu('NVIDIA GeForce GTX 970').usable, false);
+
+  // Turing and newer clear the bar.
+  assert.equal(classifyGpu('NVIDIA GeForce RTX 3090').usable, true);
+  assert.equal(classifyGpu('NVIDIA GeForce RTX 4090', '8.9').usable, true);
+  assert.equal(classifyGpu('NVIDIA A100-SXM4-40GB', '8.0').usable, true);
+
+  // An explicit capability from the driver wins over the name heuristic.
+  assert.equal(classifyGpu('Mystery Accelerator', '9.0').usable, true);
+
+  // Unknown hardware is reported as unknown rather than assumed good.
+  const unknown = classifyGpu('Some Unknown Card', null);
+  assert.equal(unknown.usable, false);
+  assert.equal(unknown.cap, null);
+  assert.match(unknown.reason, /could not determine/);
+});

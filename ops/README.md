@@ -33,6 +33,56 @@ nothing is exposed to the network you happen to be on.
 Logs land in `~/.claude-projects/logs/<name>.log`; state is a single
 `projects.json` beside them.
 
+## Windows
+
+`claude-local` runs natively on Windows -- no WSL required. It uses
+`taskkill /T` instead of POSIX process groups, follows logs in Node rather than
+shelling out to `tail`, and `autostart` writes a Startup-folder script.
+
+In PowerShell, from the repository:
+
+```powershell
+node ops\local\claude-local.mjs doctor
+node ops\local\claude-local.mjs add splatworks --dir . --health /api/health
+node ops\local\claude-local.mjs up
+node ops\local\claude-local.mjs autostart   # start at login, no admin needed
+```
+
+`autostart` writes `claude-local.vbs` into your Startup folder, which launches
+it hidden at login. Delete that file to turn it off.
+
+For the trainer, `pip install torch` on Windows already gives the CPU build --
+the CUDA wheels only come from PyTorch's own index -- so:
+
+```powershell
+pip install -r trainer\requirements.txt
+```
+
+**Use WSL2 instead if** a `pycolmap` wheel is not published for your Python
+version, or you want the server-mode bash tooling. Inside WSL2 everything in
+this repository behaves exactly as it does on Linux.
+
+## What your GPU needs to be
+
+Having an NVIDIA card is not the question; the generation is.
+
+| Compute capability | Example cards | GPU training |
+|---|---|---|
+| 7.5 and up | RTX 20xx, 30xx, 40xx, A100 | yes |
+| 6.x (Pascal) | GTX 10xx | no |
+| 5.x (Maxwell) | GTX 9xx | no |
+| 3.x (Kepler) | GTX 6xx, 7xx | no |
+| 2.x (Fermi) | GTX 4xx, 5xx | no |
+
+Current PyTorch wheels require 7.5+, and the reference 3DGS CUDA rasterizer
+requires 7.0+. CUDA itself dropped Fermi after 8.0, in 2017. On anything below
+the line there is no driver combination that works -- `claude-local doctor`
+says so outright rather than reporting "GPU found", because the alternative is
+someone losing an evening to driver installs for a dead end.
+
+Below the line, the bundled CPU trainer is the path. It is the same algorithm,
+not a cheaper approximation; it just takes longer.
+
 ---
 
 # The server mode

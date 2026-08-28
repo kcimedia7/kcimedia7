@@ -32,6 +32,7 @@ const LOG_DIR = path.join(HOME, 'logs');
 const DASHBOARD_PORT = Number(process.env.CLAUDE_LOCAL_PORT || 7777);
 const PORT_BASE = 8801;
 
+const IS_WINDOWS = process.platform === 'win32';
 const colour = process.stdout.isTTY;
 const c = {
   dim: (s) => (colour ? `\x1b[2m${s}\x1b[0m` : s),
@@ -106,6 +107,55 @@ export function validName(name) {
   return typeof name === 'string' && /^[a-z0-9][a-z0-9-]{0,39}$/.test(name) && !name.endsWith('-');
 }
 
+/**
+ * Decide whether a GPU can actually run gaussian-splat training.
+ *
+ * "Has an NVIDIA GPU" is not the question -- current PyTorch wheels need
+ * compute capability 7.5+, and CUDA dropped Fermi (2.x) after 8.0. A GTX 560 Ti
+ * reports as a perfectly healthy CUDA device and still cannot run any of this,
+ * so saying "GPU found" would send someone off installing drivers for an
+ * evening to reach a dead end.
+ */
+export function classifyGpu(name = '', computeCap = null) {
+  const MIN_TORCH_CAP = 7.5;      // default PyTorch wheels
+  const MIN_3DGS_CAP = 7.0;       // the reference CUDA rasterizer
+
+  let cap = computeCap === null ? null : Number(computeCap);
+  if (cap !== null && !Number.isFinite(cap)) cap = null;
+
+  // Old drivers have no compute_cap query -- a Fermi card with the last R390
+  // driver cannot report one -- so fall back to the model number. This is a
+  // conservative floor for the usable/not-usable decision, not an exact figure:
+  // an RTX 3090 is really 8.6 but 7.5 is enough to clear the bar.
+  if (cap === null) {
+    const m = /\b(?:GTX|GT|RTX)\s*(\d{3,4})\b/i.exec(name);
+    if (m) {
+      const model = Number(m[1]);
+      if (model >= 2000) cap = 7.5;            // RTX 20xx and up
+      else if (model >= 1600) cap = 7.5;       // GTX 16xx
+      else if (model >= 1000) cap = 6.1;       // GTX 10xx, Pascal
+      else if (model >= 900) cap = 5.2;        // GTX 9xx, Maxwell
+      else if (model >= 600) cap = 3.0;        // GTX 6xx/7xx, Kepler
+      else cap = 2.1;                          // GTX 4xx/5xx, Fermi
+    }
+  }
+
+  if (cap === null) {
+    return { usable: false, cap: null, reason: 'could not determine compute capability' };
+  }
+  if (cap >= MIN_TORCH_CAP) {
+    return { usable: true, cap, reason: null };
+  }
+  const era = cap < 3 ? 'Fermi' : cap < 3.5 ? 'Kepler' : cap < 5.3 ? 'Maxwell'
+    : cap < 7 ? 'Pascal' : 'Volta';
+  return {
+    usable: false,
+    cap,
+    reason: `compute capability ${cap} (${era}) is below what current PyTorch wheels `
+      + `(${MIN_TORCH_CAP}+) and the 3DGS CUDA rasterizer (${MIN_3DGS_CAP}+) require`,
+  };
+}
+
 // --------------------------------------------------------------- supervisor
 
 /**
@@ -148,10 +198,13 @@ class Supervisor {
         ...(project.env || {}),
       },
       stdio: ['ignore', 'pipe', 'pipe'],
-      // Its own process group. `shell: true` means the direct child is a shell,
-      // so killing that alone orphans whatever it started -- npm -> node keeps
-      // serving and the port stays bound. Signalling the group gets all of it.
-      detached: true,
+      // `shell: true` means the direct child is a shell, so killing that alone
+      // orphans whatever it started -- npm -> node keeps serving and the port
+      // stays bound. The two platforms need opposite things to prevent that:
+      // POSIX gets its own process group so the group can be signalled, while
+      // Windows has no process groups at all (see signalGroup) and `detached`
+      // there would only pop a console window and outlive us.
+      ...(IS_WINDOWS ? { windowsHide: true } : { detached: true }),
     });
     child.stdout.pipe(out);
     child.stderr.pipe(out);
@@ -195,6 +248,21 @@ class Supervisor {
   signalGroup(entry, signal) {
     const pid = entry.child.pid;
     if (!pid) return;
+
+    if (IS_WINDOWS) {
+      // Negative PIDs are a POSIX process-group idea and simply throw here.
+      // taskkill /T walks the child tree, which is the equivalent guarantee.
+      const args = ['/PID', String(pid), '/T'];
+      if (signal === 'SIGKILL') args.push('/F');
+      try {
+        spawn('taskkill', args, { stdio: 'ignore', windowsHide: true })
+          .on('error', () => { try { entry.child.kill(); } catch { /* gone */ } });
+      } catch {
+        try { entry.child.kill(); } catch { /* already gone */ }
+      }
+      return;
+    }
+
     try {
       process.kill(-pid, signal);      // the whole group: shell, npm, node
     } catch {
@@ -455,8 +523,28 @@ async function cmdLogs(argv) {
   const file = path.join(LOG_DIR, `${name}.log`);
   if (!fs.existsSync(file)) throw new Error(`no log yet for '${name}'`);
   if (argv.f || argv.follow) {
-    const tail = spawn('tail', ['-f', '-n', '100', file], { stdio: 'inherit' });
-    await new Promise((r) => tail.on('exit', r));
+    // Polling in Node rather than shelling out to `tail`, which Windows has
+    // no equivalent of, and which fs.watch reports unreliably across platforms.
+    let position = 0;
+    const initial = await fsp.readFile(file, 'utf8');
+    process.stdout.write(initial.split('\n').slice(-100).join('\n'));
+    position = Buffer.byteLength(initial);
+
+    await new Promise((resolve) => {
+      process.on('SIGINT', resolve);
+      const timer = setInterval(async () => {
+        try {
+          const { size } = await fsp.stat(file);
+          if (size < position) position = 0;          // truncated or rotated
+          if (size > position) {
+            const chunk = fs.createReadStream(file, { start: position, end: size - 1 });
+            for await (const part of chunk) process.stdout.write(part);
+            position = size;
+          }
+        } catch { /* file briefly missing during a restart */ }
+      }, 500);
+      timer.unref?.();
+    });
   } else {
     const text = await fsp.readFile(file, 'utf8');
     console.log(text.split('\n').slice(-200).join('\n'));
@@ -482,15 +570,24 @@ async function cmdDoctor() {
   await probeCmd('python3', 'python3', ['--version']);
   await probeCmd('docker', 'docker', ['--version']);
 
-  // The GPU question decides whether real gaussian training is minutes or hours.
+  // The GPU question decides whether real gaussian training is minutes or hours
+  // -- or, for an old card, impossible.
   let gpu = null;
-  try {
-    const { stdout } = await execFileAsync('nvidia-smi',
-      ['--query-gpu=name,memory.total', '--format=csv,noheader'], { timeout: 15_000 });
-    gpu = stdout.trim();
-    checks.push([true, 'nvidia gpu', gpu]);
-  } catch {
-    checks.push([false, 'nvidia gpu', os.type() === 'Darwin' ? 'none (Apple silicon: see below)' : 'none']);
+  let verdict = null;
+  for (const query of ['name,memory.total,compute_cap', 'name,memory.total']) {
+    try {
+      const { stdout } = await execFileAsync('nvidia-smi',
+        [`--query-gpu=${query}`, '--format=csv,noheader'], { timeout: 15_000 });
+      const [name, memory, cap] = stdout.trim().split('\n')[0].split(',').map((v) => v.trim());
+      gpu = { name, memory, cap: cap ?? null };
+      verdict = classifyGpu(name, cap ?? null);
+      break;
+    } catch { /* try the simpler query, then give up */ }
+  }
+  if (gpu) {
+    checks.push([verdict.usable, 'nvidia gpu', `${gpu.name}, ${gpu.memory}`]);
+  } else {
+    checks.push([false, 'nvidia gpu', os.type() === 'Darwin' ? 'none (Apple silicon)' : 'none']);
   }
 
   for (const [ok, label, detail] of checks) {
@@ -498,11 +595,16 @@ async function cmdDoctor() {
   }
 
   console.log('\n' + c.bold('gaussian splat training on this machine:'));
-  if (gpu) {
-    console.log('  A CUDA GPU is present. For fast, full-quality reconstruction install a');
+  if (gpu && verdict.usable) {
+    console.log('  This GPU can run CUDA training. For full-quality reconstruction install a');
     console.log('  GPU trainer and point the app at it:');
     console.log(c.dim('    SPLAT_TRAINER_CMD="python /opt/gaussian-splatting/train.py \\'));
     console.log(c.dim('      -s {source} -m {output} --iterations {iterations}"'));
+  } else if (gpu) {
+    console.log(`  ${c.yellow(gpu.name)} cannot run it: ${verdict.reason}.`);
+    console.log('  This is a hard limit, not a slow path -- no combination of drivers');
+    console.log('  makes it work. Use the bundled CPU trainer, which is the same');
+    console.log('  algorithm at lower speed.');
   } else if (os.type() === 'Darwin') {
     console.log('  No CUDA GPU. The bundled trainer runs on CPU here and is real but slow;');
     console.log('  PyTorch\'s Metal (mps) backend is not yet wired into the rasterizer.');
@@ -563,9 +665,28 @@ WantedBy=default.target
     console.log(`wrote ${plistPath}\n`);
     console.log('Enable it with:');
     console.log(c.bold(`  launchctl load -w ${plistPath}`));
+  } else if (IS_WINDOWS) {
+    // The Startup folder needs no admin rights and is easy to undo -- better
+    // than a scheduled task for something the user should be able to remove.
+    const startup = path.join(os.homedir(), 'AppData', 'Roaming', 'Microsoft',
+      'Windows', 'Start Menu', 'Programs', 'Startup');
+    await fsp.mkdir(startup, { recursive: true });
+    // A VBScript wrapper launches it with no console window flashing up.
+    const q = (v) => `""${v}""`;
+    const vbs = [
+      "' Starts Claude Code projects at login. Delete this file to stop.",
+      'Set sh = CreateObject("WScript.Shell")',
+      `sh.Run "${q(node)} ${q(script)} up", 0, False`,
+      '',
+    ].join('\r\n');
+    const vbsPath = path.join(startup, 'claude-local.vbs');
+    await fsp.writeFile(vbsPath, vbs);
+    console.log(`wrote ${vbsPath}\n`);
+    console.log('It will start at your next login. To start it now:');
+    console.log(c.bold(`  wscript "${vbsPath}"`));
+    console.log(c.dim('To disable, delete that file.'));
   } else {
-    console.log('On Windows, run this inside WSL2 and use the Linux instructions,');
-    console.log('or create a Task Scheduler entry running:');
+    console.log(`Unrecognised platform (${type}). Run this at login:`);
     console.log(c.bold(`  ${node} ${script} up`));
   }
 }
