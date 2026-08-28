@@ -1024,7 +1024,8 @@ up options:
   --password SECRET        require a password over the network
   --allow-anonymous        publish with no password (say so deliberately)
 
-State lives in ~/.claude-projects. Everything binds to 127.0.0.1.`;
+State lives in ~/.claude-projects. Projects bind to 127.0.0.1 unless you pass
+--lan, which also publishes them on this machine's network address.`;
 
 const COMMANDS = {
   add: cmdAdd, list: cmdList, ls: cmdList, status: cmdStatus, up: cmdUp,
