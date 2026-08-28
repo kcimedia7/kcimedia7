@@ -221,6 +221,37 @@ test('the LAN address avoids virtual adapters', async () => {
   assert.equal(lanAddress(mixed), '192.168.1.50');
 });
 
+test('a laptop with several live adapters picks the right one', async () => {
+  const { lanAddress, lanCandidates } = await import('../ops/local/claude-local.mjs');
+
+  // What a gaming laptop actually looks like: Wi-Fi carrying the traffic, an
+  // Ethernet port with no cable (so a self-assigned 169.254 address), and the
+  // usual pile of virtual adapters. Listing order is deliberately unhelpful.
+  const laptop = {
+    'vEthernet (Default Switch)': [{ family: 'IPv4', address: '172.28.80.1', internal: false }],
+    'Ethernet': [{ family: 'IPv4', address: '169.254.11.4', internal: false }],
+    'Tailscale': [{ family: 'IPv4', address: '100.94.3.7', internal: false }],
+    'Wi-Fi': [{ family: 'IPv4', address: '192.168.1.42', internal: false }],
+    'Loopback Pseudo-Interface 1': [{ family: 'IPv4', address: '127.0.0.1', internal: true }],
+  };
+  // Wi-Fi wins: the wired port has no DHCP lease, so nothing could reach it.
+  assert.equal(lanAddress(laptop), '192.168.1.42');
+
+  const ranked = lanCandidates(laptop);
+  assert.equal(ranked[0].address, '192.168.1.42');
+  assert.ok(ranked.find((c) => c.address === '169.254.11.4').selfAssigned);
+  assert.ok(ranked.find((c) => c.address === '100.94.3.7').virtual, 'a VPN is not the LAN');
+
+  // With the cable plugged in, wired should take over from Wi-Fi.
+  const docked = { ...laptop, Ethernet: [{ family: 'IPv4', address: '192.168.1.77', internal: false }] };
+  assert.equal(lanAddress(docked), '192.168.1.77');
+});
+
+test('an adapter with only a self-assigned address is never chosen', async () => {
+  const { lanAddress } = await import('../ops/local/claude-local.mjs');
+  assert.equal(lanAddress({ 'Wi-Fi': [{ family: 'IPv4', address: '169.254.9.9', internal: false }] }), null);
+});
+
 test('the network password is taken from flag, env, then stored hash', async () => {
   const { resolvePasswordHash, hashPassword } = await import('../ops/local/claude-local.mjs');
   const stored = hashPassword('from-file');

@@ -73,11 +73,19 @@ export async function detectCapabilities({ refresh = false } = {}) {
 
 async function probeCapabilities() {
 
+  // Probing the bundled trainer costs seconds -- it shells out to `import torch`
+  // -- so skip it when SPLAT_BACKEND has already forced a different backend and
+  // the answer cannot change the outcome. Still probe when 'gaussian' is forced,
+  // since then its absence is worth reporting.
+  const needsPythonProbe = BACKEND === 'auto' || BACKEND === 'gaussian';
+
   const [colmap, ffmpeg, gpu, python] = await Promise.all([
     commandExists(COLMAP_CMD, ['--help']),
     commandExists(FFMPEG_CMD, ['-version']),
     commandExists('nvidia-smi', ['-L']),
-    detectPythonTrainer(),
+    needsPythonProbe
+      ? detectPythonTrainer()
+      : Promise.resolve({ available: false, reason: 'not probed; a backend was forced' }),
   ]);
   const trainer = Boolean(TRAINER_CMD);
 

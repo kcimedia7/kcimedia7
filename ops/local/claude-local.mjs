@@ -275,20 +275,48 @@ class Supervisor {
 // -------------------------------------------------------------- lan gateway
 
 /** First non-internal IPv4 address, i.e. how other machines reach this one. */
-export function lanAddress(interfaces = os.networkInterfaces()) {
-  const candidates = [];
+const VIRTUAL_ADAPTER = /^(veth|docker|br-|vEthernet|VMware|VirtualBox|Hyper-V|WSL|Loopback|TAP|Tailscale|ZeroTier)/i;
+const WIRED_ADAPTER = /^(eth|en[a-z0-9]|Ethernet)/i;
+const WIRELESS_ADAPTER = /^(wl|Wi-?Fi|Wireless)/i;
+
+/**
+ * Every usable IPv4 address on this machine, best candidate first.
+ *
+ * Ranking matters on a laptop, where several adapters are up at once: picking
+ * whichever one the OS happened to list first can hand out an address that is
+ * on the wrong network, or a 169.254.x.x from a port with no DHCP lease, and
+ * the failure looks like a firewall problem rather than a wrong address.
+ * Wired beats wireless because it is the steadier host, and anything virtual
+ * (VM bridges, VPNs, WSL) loses to anything physical.
+ */
+export function lanCandidates(interfaces = os.networkInterfaces()) {
+  const found = [];
   for (const [name, addrs] of Object.entries(interfaces)) {
     for (const addr of addrs || []) {
       if (addr.family !== 'IPv4' && addr.family !== 4) continue;
       if (addr.internal) continue;
-      // Prefer real LAN ranges over virtual adapters (Docker, WSL, VPNs), which
-      // on a Windows box are numerous and never the address you want.
-      const virtual = /^(veth|docker|br-|vEthernet|VMware|VirtualBox|Hyper-V|WSL)/i.test(name);
-      candidates.push({ address: addr.address, virtual });
+
+      // 169.254.x.x means the adapter never got a lease -- nothing can reach it.
+      const selfAssigned = addr.address.startsWith('169.254.');
+      const virtual = VIRTUAL_ADAPTER.test(name);
+      const wired = !virtual && WIRED_ADAPTER.test(name);
+      const wireless = !virtual && WIRELESS_ADAPTER.test(name);
+
+      let score = 1;                       // physical but unrecognised
+      if (wired) score = 3;
+      else if (wireless) score = 2;
+      if (virtual) score = 0;
+      if (selfAssigned) score = -1;        // never choose this on its own
+
+      found.push({ name, address: addr.address, score, virtual, wired, wireless, selfAssigned });
     }
   }
-  const real = candidates.find((c) => !c.virtual);
-  return (real || candidates[0])?.address || null;
+  return found.sort((a, b) => b.score - a.score);
+}
+
+export function lanAddress(interfaces = os.networkInterfaces()) {
+  const best = lanCandidates(interfaces).find((c) => c.score > 0);
+  return best?.address || null;
 }
 
 export function hashPassword(password) {
@@ -776,6 +804,17 @@ async function cmdDoctor() {
 
   for (const [ok, label, detail] of checks) {
     console.log(`  ${ok ? c.green('ok ') : c.red('no ')} ${label.padEnd(12)} ${c.dim(detail)}`);
+  }
+
+  const adapters = lanCandidates();
+  if (adapters.length) {
+    console.log('\n' + c.bold('network addresses') + c.dim('  (used by --lan; override with --host)'));
+    for (const a of adapters) {
+      const kind = a.virtual ? 'virtual' : a.wired ? 'wired' : a.wireless ? 'wi-fi' : 'other';
+      const note = a.selfAssigned ? c.yellow('  no DHCP lease, unreachable') : '';
+      const mark = a.score > 0 && a === adapters[0] ? c.green(' <- chosen') : '';
+      console.log(`  ${a.address.padEnd(16)} ${kind.padEnd(8)} ${c.dim(a.name)}${mark}${note}`);
+    }
   }
 
   console.log('\n' + c.bold('gaussian splat training on this machine:'));
