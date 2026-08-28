@@ -18,6 +18,7 @@ import { BACKEND, ROOT } from '../config.js';
  */
 
 let cached = null;
+let inflight = null;
 
 export const TRAINER_CMD = process.env.SPLAT_TRAINER_CMD || '';
 export const COLMAP_CMD = process.env.SPLAT_COLMAP_CMD || 'colmap';
@@ -47,8 +48,30 @@ async function detectPythonTrainer() {
   return { available: true, reason: null };
 }
 
+/**
+ * Capabilities already known, or null while the probe is still running.
+ *
+ * Detection shells out to `python -c "import torch"`, which costs seconds on a
+ * warm cache and far longer on a cold one. Callers that must not block -- the
+ * health endpoint above all -- read this instead of awaiting.
+ */
+export function peekCapabilities() {
+  return cached;
+}
+
 export async function detectCapabilities({ refresh = false } = {}) {
   if (cached && !refresh) return cached;
+  // Concurrent callers share one probe rather than each spawning their own.
+  if (inflight && !refresh) return inflight;
+  inflight = probeCapabilities();
+  try {
+    return await inflight;
+  } finally {
+    inflight = null;
+  }
+}
+
+async function probeCapabilities() {
 
   const [colmap, ffmpeg, gpu, python] = await Promise.all([
     commandExists(COLMAP_CMD, ['--help']),
@@ -101,4 +124,5 @@ function explain({ colmap, trainer, gpu, ffmpeg, python, backend }) {
 
 export function resetCapabilityCache() {
   cached = null;
+  inflight = null;
 }

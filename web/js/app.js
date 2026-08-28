@@ -20,13 +20,20 @@ const state = {
 async function boot() {
   window.addEventListener('hashchange', route);
 
-  try {
-    const health = await api.health();
-    state.capabilities = health.capabilities;
-    paintBackendBadge(health.capabilities);
-  } catch {
-    paintBackendBadge(null);
-  }
+  // The server answers /api/health before it has finished probing which
+  // backend is available, so the badge starts as "detecting" and settles once
+  // the probe lands rather than blocking the whole page on it.
+  const refreshHealth = async (attempt = 0) => {
+    try {
+      const health = await api.health();
+      state.capabilities = health.capabilities;
+      paintBackendBadge(health.capabilities, health.ready);
+      if (!health.ready && attempt < 40) setTimeout(() => refreshHealth(attempt + 1), 1500);
+    } catch {
+      paintBackendBadge(null);
+    }
+  };
+  await refreshHealth();
 
   try {
     const { assets } = await api.list();
@@ -39,10 +46,11 @@ async function boot() {
   route();
 }
 
-function paintBackendBadge(caps) {
+function paintBackendBadge(caps, ready = true) {
   const badge = document.getElementById('backend-badge');
   if (!caps) {
-    badge.querySelector('.label').textContent = 'server unreachable';
+    badge.querySelector('.label').textContent = ready ? 'server unreachable' : 'detecting…';
+    badge.title = ready ? '' : 'Working out which reconstruction backend is available.';
     return;
   }
   badge.dataset.backend = caps.backend;

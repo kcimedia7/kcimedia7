@@ -54,20 +54,30 @@ export function createServer() {
 
 export async function start() {
   await store.init();
-  const caps = await detectCapabilities();
-  await jobs.resumeInterrupted();
 
+  // Listen before probing. Detection runs `python -c "import torch"`, which can
+  // take tens of seconds on a cold cache; doing it first meant the socket was
+  // closed that whole time, so health checks read "down" and any supervisor
+  // watching the port saw a dead service that was merely still starting.
   const server = createServer();
   await new Promise((resolve) => server.listen(PORT, HOST, resolve));
 
   console.log(`SplatWorks listening on http://${HOST}:${PORT}`);
   console.log(`  data directory : ${DATA_DIR}`);
-  console.log(`  backend        : ${caps.backend}${caps.forced ? ' (forced)' : ''}`);
-  for (const reason of caps.reasons) console.log(`  · ${reason}`);
-  if (caps.backend === 'preview') {
-    console.log('  Preview mode builds a fast proxy splat from your frames rather than a');
-    console.log('  true photogrammetric reconstruction. See README.md to enable COLMAP.');
-  }
+  console.log('  backend        : detecting…');
+
+  detectCapabilities().then((caps) => {
+    console.log(`  backend        : ${caps.backend}${caps.forced ? ' (forced)' : ''}`);
+    for (const reason of caps.reasons) console.log(`  · ${reason}`);
+    if (caps.backend === 'preview') {
+      console.log('  Preview mode builds a fast proxy splat from your frames rather than a');
+      console.log('  true photogrammetric reconstruction. See README.md to enable COLMAP.');
+    }
+    return jobs.resumeInterrupted();
+  }).catch((err) => {
+    console.error('capability detection failed:', err.message);
+  });
+
   return server;
 }
 

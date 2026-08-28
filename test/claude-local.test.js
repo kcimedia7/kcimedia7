@@ -207,3 +207,129 @@ test('GPU capability is judged, not just presence', async () => {
   assert.equal(unknown.cap, null);
   assert.match(unknown.reason, /could not determine/);
 });
+
+test('the LAN address avoids virtual adapters', async () => {
+  const { lanAddress } = await import('../ops/local/claude-local.mjs');
+  assert.equal(lanAddress({ lo: [{ family: 'IPv4', address: '127.0.0.1', internal: true }] }), null);
+
+  // A Windows host is full of Hyper-V/WSL/Docker adapters; the real NIC wins.
+  const mixed = {
+    'vEthernet (WSL)': [{ family: 'IPv4', address: '172.19.0.1', internal: false }],
+    'docker0': [{ family: 'IPv4', address: '172.17.0.1', internal: false }],
+    'Ethernet': [{ family: 'IPv4', address: '192.168.1.50', internal: false }],
+  };
+  assert.equal(lanAddress(mixed), '192.168.1.50');
+});
+
+test('the network password is taken from flag, env, then stored hash', async () => {
+  const { resolvePasswordHash, hashPassword } = await import('../ops/local/claude-local.mjs');
+  const stored = hashPassword('from-file');
+
+  assert.equal(resolvePasswordHash({ password: 'flag' }, {}, () => stored), hashPassword('flag'));
+  assert.equal(resolvePasswordHash({}, { CLAUDE_LOCAL_PASSWORD: 'env' }, () => stored), hashPassword('env'));
+  assert.equal(resolvePasswordHash({}, {}, () => stored), stored);
+  assert.equal(resolvePasswordHash({}, {}, () => null), null);
+});
+
+test('the LAN gateway demands the password and proxies what it allows', async () => {
+  const http = await import('node:http');
+  const { createGateway, hashPassword } = await import('../ops/local/claude-local.mjs');
+
+  const upstream = http.createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'text/plain' });
+    res.end(`upstream saw ${req.url}`);
+  });
+  await new Promise((r) => upstream.listen(0, '127.0.0.1', r));
+  const targetPort = upstream.address().port;
+
+  const gateway = createGateway({
+    bindHost: '127.0.0.1', port: 0, targetPort, passwordHash: hashPassword('open-sesame'),
+  });
+  await new Promise((r) => gateway.on('listening', r));
+  const port = gateway.address().port;
+  const call = (headers) => fetch(`http://127.0.0.1:${port}/api/thing`, { headers });
+
+  try {
+    const anonymous = await call({});
+    assert.equal(anonymous.status, 401);
+    assert.match(anonymous.headers.get('www-authenticate') || '', /Basic realm/);
+
+    const wrong = await call({ authorization: `Basic ${Buffer.from('u:nope').toString('base64')}` });
+    assert.equal(wrong.status, 401);
+
+    const right = await call({ authorization: `Basic ${Buffer.from('u:open-sesame').toString('base64')}` });
+    assert.equal(right.status, 200);
+    // The path is forwarded untouched -- absolute URLs inside an app depend on it.
+    assert.equal(await right.text(), 'upstream saw /api/thing');
+
+    const malformed = await call({ authorization: 'Basic not-base64!!' });
+    assert.equal(malformed.status, 401);
+  } finally {
+    gateway.close();
+    upstream.close();
+  }
+});
+
+test('an open gateway needs no credentials', async () => {
+  const http = await import('node:http');
+  const { createGateway } = await import('../ops/local/claude-local.mjs');
+  const upstream = http.createServer((_, res) => { res.writeHead(200); res.end('ok'); });
+  await new Promise((r) => upstream.listen(0, '127.0.0.1', r));
+  const gateway = createGateway({
+    bindHost: '127.0.0.1', port: 0, targetPort: upstream.address().port, passwordHash: null,
+  });
+  await new Promise((r) => gateway.on('listening', r));
+  try {
+    assert.equal((await fetch(`http://127.0.0.1:${gateway.address().port}/`)).status, 200);
+  } finally {
+    gateway.close();
+    upstream.close();
+  }
+});
+
+test('the gateway reports an unreachable project rather than hanging', async () => {
+  const { createGateway } = await import('../ops/local/claude-local.mjs');
+  // Port 1 has nothing on it, standing in for a project that failed to start.
+  const gateway = createGateway({ bindHost: '127.0.0.1', port: 0, targetPort: 1, passwordHash: null });
+  await new Promise((r) => gateway.on('listening', r));
+  try {
+    const res = await fetch(`http://127.0.0.1:${gateway.address().port}/`);
+    assert.equal(res.status, 502);
+    assert.match(await res.text(), /not responding/);
+  } finally {
+    gateway.close();
+  }
+});
+
+test('windows-setup never writes the password into the task or shortcuts', async () => {
+  // Regression guard: the first version put --password on the task's command
+  // line, leaving the secret in a long-lived XML file and in `ps` output.
+  const home = await tempHome();
+  const src = path.join(home, 'app');
+  await fsp.mkdir(src, { recursive: true });
+  await fsp.writeFile(path.join(src, 'package.json'), '{}');
+  await run(home, ['add', 'demo', '--dir', src, '--port', '8787']);
+
+  const secret = 'correct-horse-battery-staple';
+  await run(home, ['windows-setup', '--force', '--password', secret]);
+
+  const winDir = path.join(home, 'windows');
+  for (const entry of await fsp.readdir(winDir)) {
+    const raw = await fsp.readFile(path.join(winDir, entry));
+    for (const encoding of ['utf8', 'utf16le']) {
+      assert.ok(!raw.toString(encoding).includes(secret),
+        `${entry} contains the password (as ${encoding})`);
+    }
+  }
+
+  // What is stored is a digest, and only a digest.
+  const stored = (await fsp.readFile(path.join(home, 'password.sha256'), 'utf8')).trim();
+  assert.match(stored, /^[0-9a-f]{64}$/);
+  assert.notEqual(stored, secret);
+
+  // The boot task must still be a boot task, and unprivileged.
+  const xml = (await fsp.readFile(path.join(winDir, 'claude-local-task.xml'))).toString('utf16le');
+  assert.match(xml, /<BootTrigger>/);
+  assert.match(xml, /LeastPrivilege/);
+  assert.match(xml, /"up" --lan/);
+});

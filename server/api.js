@@ -7,7 +7,7 @@ import { parseMultipart } from './http/multipart.js';
 import {
   Router, sendJson, sendError, readJsonBody, sendFile, sanitiseFilename,
 } from './http/router.js';
-import { detectCapabilities } from './pipeline/backends.js';
+import { detectCapabilities, peekCapabilities } from './pipeline/backends.js';
 import { stagePlan } from './pipeline/index.js';
 import { decodePly, encodePly } from './pipeline/ply.js';
 import { decodeSplatBuffer, encodeSplatBuffer } from './pipeline/splat.js';
@@ -19,13 +19,20 @@ const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
 export function createApiRouter() {
   const r = new Router();
 
-  r.get('/api/health', async (req, res) => {
-    const caps = await detectCapabilities();
+  r.get('/api/health', (req, res) => {
+    // Answers straight away so a health check never waits on backend detection;
+    // `ready` tells the client whether to ask again.
+    const caps = peekCapabilities();
     sendJson(res, 200, {
       ok: true,
+      ready: Boolean(caps),
       capabilities: caps,
       queue: jobs.queueState(),
-      plans: { preview: stagePlan('preview'), colmap: stagePlan('colmap') },
+      plans: {
+        preview: stagePlan('preview'),
+        colmap: stagePlan('colmap'),
+        gaussian: stagePlan('gaussian'),
+      },
     });
   });
 

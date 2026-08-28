@@ -62,6 +62,52 @@ pip install -r trainer\requirements.txt
 version, or you want the server-mode bash tooling. Inside WSL2 everything in
 this repository behaves exactly as it does on Linux.
 
+## Hosting from a Windows machine (e.g. Admin-Server)
+
+To have one machine serve the apps and reach them from other desktops:
+
+```powershell
+# on the host, from the repository
+node ops\local\claude-local.mjs add splatworks --dir . --health /api/health
+node ops\local\claude-local.mjs windows-setup --password "<a secret>"
+```
+
+`windows-setup` writes a boot-time scheduled task, three desktop shortcuts
+(Start / Stop / Open), and prints the two Administrator commands to run: one
+`netsh` firewall rule, and the `schtasks` import. Then from any machine on the
+network:
+
+```
+http://Admin-Server:7777
+```
+
+### How it publishes
+
+Each project keeps its own port. The host binds `<lan-ip>:PORT` for each one and
+forwards to `127.0.0.1:PORT`, which does not collide because they are different
+addresses. Paths are forwarded untouched, so every absolute `/api/...` URL
+inside an app still resolves -- a path-prefix proxy would break them.
+
+`up` refuses `--lan` unless you set a password or pass `--allow-anonymous`.
+These projects accept uploads and can delete a library, so publishing them to a
+network is a decision rather than a default.
+
+**The password is stored as a SHA-256 digest** in `~/.claude-projects/password.sha256`
+(mode 600). It is deliberately not passed as an argument: a boot task and a
+desktop shortcut are long-lived plaintext files, and a command line is visible
+in `ps`. Requests are checked with a constant-time comparison of digests.
+
+Connections from the host itself stay unauthenticated -- someone sitting at
+Admin-Server already has it.
+
+### Running at boot vs at login
+
+`autostart` starts it when you log in. `windows-setup` builds a **boot** task
+that runs with no one logged in, which is what a server wants. The task runs at
+LeastPrivilege, not as SYSTEM. Windows prompts for the account password during
+`schtasks /create` and stores it in the Task Scheduler's own credential store,
+so it never passes through this tool.
+
 ## What your GPU needs to be
 
 Having an NVIDIA card is not the question; the generation is.

@@ -20,6 +20,7 @@ import fsp from 'node:fs/promises';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { spawn, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
@@ -271,15 +272,151 @@ class Supervisor {
   }
 }
 
+// -------------------------------------------------------------- lan gateway
+
+/** First non-internal IPv4 address, i.e. how other machines reach this one. */
+export function lanAddress(interfaces = os.networkInterfaces()) {
+  const candidates = [];
+  for (const [name, addrs] of Object.entries(interfaces)) {
+    for (const addr of addrs || []) {
+      if (addr.family !== 'IPv4' && addr.family !== 4) continue;
+      if (addr.internal) continue;
+      // Prefer real LAN ranges over virtual adapters (Docker, WSL, VPNs), which
+      // on a Windows box are numerous and never the address you want.
+      const virtual = /^(veth|docker|br-|vEthernet|VMware|VirtualBox|Hyper-V|WSL)/i.test(name);
+      candidates.push({ address: addr.address, virtual });
+    }
+  }
+  const real = candidates.find((c) => !c.virtual);
+  return (real || candidates[0])?.address || null;
+}
+
+export function hashPassword(password) {
+  return crypto.createHash('sha256').update(String(password)).digest('hex');
+}
+
+/** @param passwordHash hex sha256, or empty/null for an open service. */
+function checkBasicAuth(header, passwordHash) {
+  if (!passwordHash) return true;
+  if (!header || !header.startsWith('Basic ')) return false;
+  let decoded;
+  try {
+    decoded = Buffer.from(header.slice(6), 'base64').toString('utf8');
+  } catch {
+    return false;
+  }
+  const supplied = decoded.slice(decoded.indexOf(':') + 1);
+  // Fixed-width digests, so the comparison leaks neither length nor content.
+  const a = Buffer.from(hashPassword(supplied), 'hex');
+  const b = Buffer.from(passwordHash, 'hex');
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}
+
+const PASSWORD_FILE = path.join(HOME, 'password.sha256');
+
+/**
+ * Where the network password comes from, most explicit first.
+ *
+ * The stored form is a digest, and it is stored rather than passed as an
+ * argument because a boot task and a desktop shortcut are both long-lived
+ * plaintext files: putting --password in either would leave the secret sitting
+ * on disk and in `ps` output for anyone on the machine.
+ */
+export function resolvePasswordHash(argv = {}, env = process.env, readFile = defaultReadPasswordFile) {
+  if (typeof argv.password === 'string' && argv.password) return hashPassword(argv.password);
+  if (env.CLAUDE_LOCAL_PASSWORD) return hashPassword(env.CLAUDE_LOCAL_PASSWORD);
+  const stored = readFile();
+  return stored || null;
+}
+
+function defaultReadPasswordFile() {
+  try {
+    const value = fs.readFileSync(PASSWORD_FILE, 'utf8').trim();
+    return /^[0-9a-f]{64}$/.test(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+async function savePasswordHash(hash) {
+  await fsp.mkdir(HOME, { recursive: true });
+  await fsp.writeFile(PASSWORD_FILE, `${hash}\n`, { mode: 0o600 });
+  try { await fsp.chmod(PASSWORD_FILE, 0o600); } catch { /* Windows uses profile ACLs */ }
+  return PASSWORD_FILE;
+}
+
+/**
+ * Publish one loopback service on the LAN.
+ *
+ * Binding <lan-ip>:PORT does not collide with 127.0.0.1:PORT -- they are
+ * different addresses -- so each project keeps its own port number and every
+ * absolute URL inside it still resolves. That is why this forwards rather than
+ * rewriting paths: a path prefix would break every "/api/..." the app emits.
+ */
+export function createGateway({ bindHost, port, targetPort, passwordHash, onError }) {
+  const server = http.createServer((req, res) => {
+    if (!checkBasicAuth(req.headers.authorization, passwordHash)) {
+      res.writeHead(401, {
+        'WWW-Authenticate': 'Basic realm="Claude Code projects", charset="UTF-8"',
+        'content-type': 'text/plain',
+      });
+      res.end('authentication required\n');
+      return;
+    }
+    const upstream = http.request(
+      { host: '127.0.0.1', port: targetPort, path: req.url, method: req.method, headers: req.headers },
+      (upstreamRes) => {
+        res.writeHead(upstreamRes.statusCode, upstreamRes.headers);
+        // Piped, never buffered, so server-sent events keep streaming.
+        upstreamRes.pipe(res);
+      },
+    );
+    upstream.on('error', (err) => {
+      onError?.(err);
+      if (!res.headersSent) res.writeHead(502, { 'content-type': 'text/plain' });
+      res.end('project is not responding\n');
+    });
+    req.pipe(upstream);
+  });
+
+  // Carry websocket upgrades through as well, for projects that use them.
+  server.on('upgrade', (req, socket, head) => {
+    if (!checkBasicAuth(req.headers.authorization, passwordHash)) {
+      socket.end('HTTP/1.1 401 Unauthorized\r\n\r\n');
+      return;
+    }
+    const upstream = http.request({
+      host: '127.0.0.1', port: targetPort, path: req.url, method: req.method,
+      headers: req.headers,
+    });
+    upstream.on('upgrade', (upstreamRes, upstreamSocket, upstreamHead) => {
+      const lines = Object.entries(upstreamRes.headers)
+        .map(([k, v]) => `${k}: ${v}`).join('\r\n');
+      socket.write(`HTTP/1.1 101 Switching Protocols\r\n${lines}\r\n\r\n`);
+      if (upstreamHead?.length) socket.unshift(upstreamHead);
+      upstreamSocket.pipe(socket).pipe(upstreamSocket);
+    });
+    upstream.on('error', () => socket.destroy());
+    if (head?.length) upstream.write(head);
+    upstream.end();
+  });
+
+  server.listen(port, bindHost);
+  return server;
+}
+
 // --------------------------------------------------------------- dashboard
 
-function dashboardHtml(state, health) {
+function dashboardHtml(state, health, viewHost = '127.0.0.1') {
   const rows = state.projects.map((p) => {
     const status = health[p.name] || 'unknown';
     const badge = status === 'up' ? 'up' : status === 'static' ? 'static' : 'down';
+    // Build links from the host the browser actually used, or every link on
+    // the dashboard points at the viewer's own machine instead of the server.
     const href = p.kind === 'static'
       ? `/static/${encodeURIComponent(p.name)}/`
-      : `http://127.0.0.1:${p.port}/`;
+      : `http://${viewHost}:${p.port}/`;
     return `
       <a class="card ${badge}" href="${href}"${p.kind === 'static' ? '' : ' target="_blank" rel="noreferrer"'}>
         <span class="dot"></span>
@@ -375,8 +512,10 @@ function startDashboard(state) {
 
     const health = {};
     await Promise.all(state.projects.map(async (p) => { health[p.name] = await probe(p); }));
+    const hostHeader = req.headers.host || '127.0.0.1';
+    const viewHost = hostHeader.replace(/:\d+$/, '').replace(/^\[|\]$/g, '') || '127.0.0.1';
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-    res.end(dashboardHtml(state, health));
+    res.end(dashboardHtml(state, health, viewHost));
   });
   // Loopback only, deliberately.
   server.listen(DASHBOARD_PORT, '127.0.0.1');
@@ -469,14 +608,51 @@ async function cmdRemove(argv) {
   console.log(`${c.green('removed')} ${name}`);
 }
 
-async function cmdUp() {
+async function cmdUp(argv = { _: [] }) {
   if (readPid()) throw new Error('already running; use `claude-local down` first');
   const state = await loadState();
   await fsp.mkdir(LOG_DIR, { recursive: true });
 
+  const wantsLan = Boolean(argv.lan || argv.host);
+  const passwordHash = resolvePasswordHash(argv);
+  let bindHost = null;
+
+  if (wantsLan) {
+    bindHost = typeof argv.host === 'string' ? argv.host : lanAddress();
+    if (!bindHost) {
+      throw new Error('could not find a LAN address on this machine; pass --host <ip>');
+    }
+    // These projects accept uploads and can delete a library. Publishing them
+    // to a network without a password should be a decision, not a default.
+    if (!passwordHash && !argv['allow-anonymous']) {
+      throw new Error(
+        'refusing to publish on the network without a password.\n'
+        + '  Add --password <secret>, or --allow-anonymous if this network is trusted\n'
+        + '  and you accept that anyone on it can use and delete these projects.',
+      );
+    }
+  }
+
   const supervisor = new Supervisor(state);
   await supervisor.startAll();
   const server = startDashboard(state);
+
+  const gateways = [];
+  if (bindHost) {
+    const publish = (port, targetPort) => {
+      const gw = createGateway({
+        bindHost, port, targetPort, passwordHash,
+        onError: () => {},
+      });
+      gw.on('error', (err) => console.error(`${c.red('gateway')} ${port}: ${err.message}`));
+      gateways.push(gw);
+    };
+    publish(DASHBOARD_PORT, DASHBOARD_PORT);
+    for (const p of state.projects) {
+      if (p.kind !== 'static') publish(p.port, p.port);
+    }
+  }
+
   fs.writeFileSync(PID_FILE, String(process.pid));
 
   let shuttingDown = false;
@@ -484,6 +660,7 @@ async function cmdUp() {
     if (shuttingDown) return;
     shuttingDown = true;
     server.close();
+    for (const gw of gateways) { try { gw.close(); } catch { /* already closed */ } }
     // Wait for the children to die before the supervisor does, or `down`
     // reports success while projects still hold their ports.
     await supervisor.stopAll();
@@ -493,10 +670,17 @@ async function cmdUp() {
   process.on('SIGINT', () => { void shutdown(); });
   process.on('SIGTERM', () => { void shutdown(); });
 
-  console.log(`${c.green('up')} — dashboard at ${c.bold(`http://127.0.0.1:${DASHBOARD_PORT}`)}`);
+  const shown = bindHost || '127.0.0.1';
+  console.log(`${c.green('up')} — dashboard at ${c.bold(`http://${shown}:${DASHBOARD_PORT}`)}`);
   for (const p of state.projects) {
-    if (p.kind === 'static') console.log(`  ${p.name}  ${c.dim('static')}`);
-    else console.log(`  ${p.name}  http://127.0.0.1:${p.port}`);
+    if (p.kind === 'static') console.log(`  ${p.name}  ${c.dim('served on the dashboard')}`);
+    else console.log(`  ${p.name}  http://${shown}:${p.port}`);
+  }
+  if (bindHost) {
+    console.log(`\n${c.green('published on the network')} as ${c.bold(os.hostname())} (${bindHost})`);
+    console.log(c.dim(`  from another machine: http://${os.hostname()}:${DASHBOARD_PORT}`));
+    if (passwordHash) console.log(c.dim('  a password is required'));
+    else console.log(c.yellow('  no password: anyone on this network can use and delete these projects'));
   }
   console.log(c.dim('\nCtrl-C to stop, or run `claude-local down` from another shell.'));
 }
@@ -691,6 +875,116 @@ WantedBy=default.target
   }
 }
 
+/**
+ * Set up a Windows machine to host these projects: a boot-time scheduled task,
+ * a firewall rule, and desktop shortcuts.
+ *
+ * Deliberately writes files and prints commands rather than running the
+ * privileged ones itself -- creating a task that runs without login needs the
+ * account password, and the Task Scheduler import prompts for it securely
+ * instead of leaving it in a command line and shell history.
+ */
+async function cmdWindowsSetup(argv) {
+  if (!IS_WINDOWS && !argv.force) {
+    console.log(c.yellow('This prepares a Windows host; run it there (or pass --force to generate the files anyway).'));
+    if (!argv.force) return;
+  }
+
+  const state = await loadState();
+  const outDir = path.join(HOME, 'windows');
+  await fsp.mkdir(outDir, { recursive: true });
+
+  const node = process.execPath;
+  const script = path.resolve(process.argv[1]);
+  // Store the digest; never write the secret into the task or the shortcuts.
+  let storedAt = null;
+  if (typeof argv.password === 'string' && argv.password) {
+    storedAt = await savePasswordHash(hashPassword(argv.password));
+  }
+  const passwordHash = resolvePasswordHash({});     // file/env only, not argv
+  const args = ['up', '--lan'];
+  if (!passwordHash) args.push('--allow-anonymous');
+
+  // A scheduled task at startup, so it serves without anyone logging in.
+  const taskXml = `<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>Hosts Claude Code projects on this machine.</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <BootTrigger><Enabled>true</Enabled></BootTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <LogonType>Password</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <RestartOnFailure><Interval>PT1M</Interval><Count>3</Count></RestartOnFailure>
+    <Enabled>true</Enabled>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>${node}</Command>
+      <Arguments>"${script}" ${args.map((a) => (a.startsWith('--') ? a : `"${a}"`)).join(' ')}</Arguments>
+      <WorkingDirectory>${path.dirname(script)}</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>
+`;
+  const xmlPath = path.join(outDir, 'claude-local-task.xml');
+  // Task Scheduler wants UTF-16 with a BOM; UTF-8 is rejected on import.
+  await fsp.writeFile(xmlPath, '\ufeff' + taskXml, 'utf16le');
+
+  // Desktop shortcuts, as .cmd so they are readable and easy to delete.
+  const desktop = path.join(os.homedir(), 'Desktop');
+  const shortcuts = {
+    'Start projects.cmd': `@echo off\r\n"${node}" "${script}" ${args.join(' ')}\r\npause\r\n`,
+    'Stop projects.cmd': `@echo off\r\n"${node}" "${script}" down\r\npause\r\n`,
+    'Open projects.cmd': `@echo off\r\nstart http://localhost:${DASHBOARD_PORT}\r\n`,
+  };
+  const written = [];
+  for (const [file, body] of Object.entries(shortcuts)) {
+    const target = path.join(fs.existsSync(desktop) ? desktop : outDir, file);
+    await fsp.writeFile(target, body);
+    written.push(target);
+  }
+
+  const ports = [DASHBOARD_PORT, ...state.projects.filter((p) => p.kind !== 'static').map((p) => p.port)];
+  const firewall = `netsh advfirewall firewall add rule name="Claude Code projects" `
+    + `dir=in action=allow protocol=TCP localport=${ports.join(',')} profile=private`;
+
+  console.log(c.bold('Files written'));
+  console.log(`  ${xmlPath}`);
+  for (const f of written) console.log(`  ${f}`);
+
+  console.log('\n' + c.bold('1. Allow the ports through the firewall') + c.dim('  (Administrator prompt)'));
+  console.log(`   ${firewall}`);
+  console.log(c.dim('   profile=private keeps it off public networks. Change to =domain on a work domain.'));
+
+  console.log('\n' + c.bold('2. Run at boot, without anyone logged in') + c.dim('  (Administrator prompt)'));
+  console.log(`   schtasks /create /tn "Claude Code projects" /xml "${xmlPath}" /ru "%USERNAME%"`);
+  console.log(c.dim('   Windows will prompt for your password. It is stored by the Task'));
+  console.log(c.dim('   Scheduler, not by this tool, and never appears in your command history.'));
+  console.log(c.dim(`   Start it now:  schtasks /run /tn "Claude Code projects"`));
+
+  console.log('\n' + c.bold('3. Reach it from another machine'));
+  const lan = lanAddress();
+  console.log(`   http://${os.hostname()}:${DASHBOARD_PORT}${lan ? `   or   http://${lan}:${DASHBOARD_PORT}` : ''}`);
+  if (storedAt) {
+    console.log(c.dim(`\n   Password stored as a hash in ${storedAt}; the task and shortcuts`));
+    console.log(c.dim('   contain no secret.'));
+  } else if (!passwordHash) {
+    console.log(c.yellow('\n   No password set. Anyone on this network can use and delete these'));
+    console.log(c.yellow('   projects. Re-run with --password <secret> to require one.'));
+  }
+}
+
 // -------------------------------------------------------------------- main
 
 function parseArgv(args) {
@@ -721,14 +1015,21 @@ const USAGE = `claude-local -- run your Claude Code projects on this computer
   logs <name> [-f]         output from one project
   remove <name>            unregister
   doctor                   what this machine can do (including GPU)
-  autostart                install a login/boot service for this OS
+  autostart                start at login (this OS)
+  windows-setup            host on Windows: boot task, firewall, shortcuts
+
+up options:
+  --lan                    publish on the local network, not just this machine
+  --host IP                bind a specific address (default: detected LAN address)
+  --password SECRET        require a password over the network
+  --allow-anonymous        publish with no password (say so deliberately)
 
 State lives in ~/.claude-projects. Everything binds to 127.0.0.1.`;
 
 const COMMANDS = {
   add: cmdAdd, list: cmdList, ls: cmdList, status: cmdStatus, up: cmdUp,
   down: cmdDown, logs: cmdLogs, remove: cmdRemove, rm: cmdRemove,
-  doctor: cmdDoctor, autostart: cmdAutostart,
+  doctor: cmdDoctor, autostart: cmdAutostart, 'windows-setup': cmdWindowsSetup,
 };
 
 async function main() {
