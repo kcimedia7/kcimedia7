@@ -21,8 +21,11 @@ export function createApiRouter() {
 
   r.get('/api/health', (req, res) => {
     // Answers straight away so a health check never waits on backend detection;
-    // `ready` tells the client whether to ask again.
+    // `ready` tells the client whether to ask again. Asking also *starts* the
+    // probe if nothing has yet, so the endpoint does not depend on start()
+    // having run -- detectCapabilities dedupes concurrent callers.
     const caps = peekCapabilities();
+    if (!caps) void detectCapabilities().catch(() => {});
     sendJson(res, 200, {
       ok: true,
       ready: Boolean(caps),

@@ -73,13 +73,31 @@ async function waitForStatus(id, wanted, timeoutMs = 45_000) {
   throw new Error(`asset ${id} never reached ${wanted.join('/')}`);
 }
 
-test('health reports the backend and stage plans', async () => {
+test('health answers immediately, before backend detection finishes', async () => {
+  // The server binds its socket before probing backends, because detection
+  // shells out to `import torch` and can take tens of seconds. Health must
+  // therefore answer straight away, flagging that capabilities are pending.
   const res = await fetch(`${base}/api/health`);
   assert.equal(res.status, 200);
   const body = await res.json();
   assert.equal(body.ok, true);
-  assert.equal(body.capabilities.backend, 'preview');
+  assert.equal(typeof body.ready, 'boolean');
   assert.ok(Array.isArray(body.plans.colmap));
+  assert.ok(Array.isArray(body.plans.gaussian));
+  if (!body.ready) assert.equal(body.capabilities, null);
+});
+
+test('health reports the backend once detection lands', async () => {
+  let body = null;
+  const deadline = Date.now() + 60_000;
+  while (Date.now() < deadline) {
+    body = await (await fetch(`${base}/api/health`)).json();
+    if (body.ready) break;
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  assert.equal(body.ready, true, 'capability detection never completed');
+  assert.equal(body.capabilities.backend, 'preview');
+  assert.equal(body.capabilities.reconstructs, false);
 });
 
 test('the library starts empty', async () => {
