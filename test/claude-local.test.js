@@ -173,7 +173,16 @@ test('up starts a project and down leaves nothing running', async () => {
     assert.ok(projectGone, 'the project must not survive `down`');
     assert.equal(await reachable(dashPort), null, 'the dashboard must stop too');
   } finally {
-    try { process.kill(-up.pid, 'SIGKILL'); } catch { /* already gone */ }
+    // Negative PIDs are POSIX-only and throw on Windows, which would leave the
+    // supervisor running and holding its ports for every later test run.
+    if (process.platform === 'win32') {
+      try {
+        const { execFileSync } = await import('node:child_process');
+        execFileSync('taskkill', ['/PID', String(up.pid), '/T', '/F'], { stdio: 'ignore' });
+      } catch { /* already gone */ }
+    } else {
+      try { process.kill(-up.pid, 'SIGKILL'); } catch { /* already gone */ }
+    }
     try { up.kill('SIGKILL'); } catch { /* already gone */ }
   }
 });

@@ -10,8 +10,8 @@
   "scripts": {
     "start": "node server/index.js",
     "dev": "node --watch server/index.js",
-    "test": "node --test 'test/**/*.test.js'",
-    "test:ops": "./ops/tests/test_ops.sh",
+    "test": "node --test \"test/**/*.test.js\"",
+    "test:ops": "bash ops/tests/test_ops.sh",
     "test:all": "npm test && npm run test:ops"
   }
 }
