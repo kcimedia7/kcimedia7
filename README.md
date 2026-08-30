@@ -309,6 +309,29 @@ Netlify hosts the standalone build, AWS hosts the server app, and
 short version being that multi-gigabyte uploads, a persistent library, a job
 queue and an SSE stream do not fit inside a 10-second Lambda.
 
+## When a conversion finishes but shows nothing
+
+The gaussian count in the viewer comes from the file header, so it reads
+correctly whatever the values are. A conversion that diverged writes a valid
+PLY, loads, sorts and reports a frame rate — and draws nothing. To find out
+which it is:
+
+```
+npm run inspect data/assets/<id>/output/point_cloud.ply
+```
+
+It reports non-finite values, the opacity and scale distributions, and the scene
+extent, then names what would make the render blank. Note that the thumbnail on
+each library card is the **middle source frame**, not a render of the result —
+so a good-looking thumbnail says the upload worked, nothing more.
+
+The most common cause is a capture with too little parallax. Walking straight
+down a road or straight towards a subject moves the camera along its own view
+direction, which barely constrains depth; the solve is poorly conditioned and
+can diverge. Orbiting around the subject fixes it.
+
+---
+
 ## Limitations worth knowing
 
 - The preview backend, used only when neither trainer is available, assumes an

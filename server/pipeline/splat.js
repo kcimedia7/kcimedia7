@@ -80,9 +80,20 @@ export function boundsOf(cloud) {
   for (let i = 0; i < cloud.count; i++) {
     for (let k = 0; k < 3; k++) {
       const v = cloud.positions[i * 3 + k];
+      // A diverged training run writes NaN into positions. Comparisons against
+      // NaN are all false so it would not widen the bounds here, but it does
+      // poison every percentile in robustBounds -- and bounds that are not
+      // finite leave the camera unplaceable and the viewport black, while the
+      // gaussian count still reads correctly. Skip them in both places.
+      if (!Number.isFinite(v)) continue;
       if (v < min[k]) min[k] = v;
       if (v > max[k]) max[k] = v;
     }
+  }
+  // Nothing finite anywhere: fall back to a unit box rather than returning
+  // Infinity, which fails the same way NaN does.
+  for (let k = 0; k < 3; k++) {
+    if (!Number.isFinite(min[k]) || !Number.isFinite(max[k])) { min[k] = 0; max[k] = 0; }
   }
   const center = [0, 1, 2].map((k) => (min[k] + max[k]) / 2);
   const radius = Math.max(
@@ -100,11 +111,20 @@ export function boundsOf(cloud) {
 export function robustBounds(cloud, lowPct = 0.02, highPct = 0.98) {
   if (!cloud.count) return boundsOf(cloud);
   const axes = [0, 1, 2].map((k) => {
+    // Typed-array sort is numeric, but it orders NaN last -- so a diverged run
+    // with more than (1 - highPct) of its positions non-finite would put NaN at
+    // the high percentile and make the radius NaN. Collect only finite values.
     const vals = new Float32Array(cloud.count);
-    for (let i = 0; i < cloud.count; i++) vals[i] = cloud.positions[i * 3 + k];
-    vals.sort();
-    const lo = vals[Math.floor((vals.length - 1) * lowPct)];
-    const hi = vals[Math.floor((vals.length - 1) * highPct)];
+    let n = 0;
+    for (let i = 0; i < cloud.count; i++) {
+      const v = cloud.positions[i * 3 + k];
+      if (Number.isFinite(v)) vals[n++] = v;
+    }
+    if (!n) return [0, 0];
+    const finite = vals.subarray(0, n);
+    finite.sort();
+    const lo = finite[Math.floor((n - 1) * lowPct)];
+    const hi = finite[Math.floor((n - 1) * highPct)];
     return [lo, hi];
   });
   const center = axes.map(([lo, hi]) => (lo + hi) / 2);

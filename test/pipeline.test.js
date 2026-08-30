@@ -1,10 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { reconstructPreview } from '../server/pipeline/preview.js';
-import { pickEvenly, stagePlan } from '../server/pipeline/index.js';
+import { pickEvenly, stagePlan, requireRenderableCloud } from '../server/pipeline/index.js';
 import { buildTrainerArgv, tokenize } from '../server/pipeline/colmap.js';
 import { sanitiseSettings } from '../server/api.js';
-import { boundsOf } from '../server/pipeline/splat.js';
+import { boundsOf, createCloud, robustBounds } from '../server/pipeline/splat.js';
 
 /** A frame with a bright subject on a flat backdrop. */
 function frame(width = 96, height = 72, hue = 0) {
@@ -137,4 +137,68 @@ test('settings from the client are clamped and filtered', () => {
   assert.equal(s.injected, undefined);
 
   assert.equal(sanitiseSettings({ backend: 'preview' }).backend, 'preview');
+});
+
+test('a diverged reconstruction fails instead of reporting success', () => {
+  // Training that diverges still writes a well-formed PLY: the count, the file
+  // size and the status all look right, and the viewer draws nothing because
+  // the values are NaN. Presenting that as a finished conversion sends the user
+  // looking for a renderer fault that does not exist.
+  const cloud = createCloud(1000);
+  for (let i = 0; i < 1000; i++) {
+    cloud.positions[i * 3] = i * 0.01;
+    for (let k = 0; k < 3; k++) cloud.scales[i * 3 + k] = 0.02;
+    cloud.opacities[i] = 0.8;
+    cloud.rotations[i * 4] = 1;
+  }
+  // Well past the tolerance: the surviving gaussians are not trustworthy either.
+  for (let i = 0; i < 50; i++) cloud.positions[i * 3 + 1] = NaN;
+  assert.throws(() => requireRenderableCloud(cloud), /diverged/);
+});
+
+test('a handful of stray gaussians is dropped rather than failing the run', () => {
+  // One bad splat in thousands is not worth discarding half an hour of compute
+  // for, as long as it cannot poison the framing.
+  const cloud = createCloud(1000);
+  for (let i = 0; i < 1000; i++) {
+    cloud.positions[i * 3] = i * 0.01;
+    for (let k = 0; k < 3; k++) cloud.scales[i * 3 + k] = 0.02;
+    cloud.opacities[i] = 0.8;
+    cloud.rotations[i * 4] = 1;
+  }
+  cloud.positions[7 * 3 + 2] = Infinity;
+  cloud.opacities[11] = NaN;
+  const cleaned = requireRenderableCloud(cloud);
+  assert.equal(cleaned.count, 998);
+  for (let i = 0; i < cleaned.count; i++) {
+    assert.ok(Number.isFinite(cleaned.positions[i * 3 + 2]));
+    assert.ok(Number.isFinite(cleaned.opacities[i]));
+  }
+  // And the framing it feeds must come back placeable.
+  const b = robustBounds(cleaned);
+  assert.ok(Number.isFinite(b.radius) && b.center.every(Number.isFinite));
+});
+
+test('an empty reconstruction is reported as such', () => {
+  assert.throws(() => requireRenderableCloud(createCloud(0)), /no gaussians/);
+});
+
+test('bounds stay placeable when positions are not finite', () => {
+  // This is the specific failure that turns the viewport black while the
+  // gaussian count still reads correctly, so it is checked directly.
+  const cloud = createCloud(200);
+  for (let i = 0; i < 200; i++) {
+    for (let k = 0; k < 3; k++) cloud.positions[i * 3 + k] = i;
+  }
+  for (let i = 0; i < 60; i++) cloud.positions[i * 3] = NaN; // 30%, past the percentile
+  for (const b of [robustBounds(cloud), boundsOf(cloud)]) {
+    assert.ok(Number.isFinite(b.radius), 'radius must stay finite');
+    assert.ok(b.center.every(Number.isFinite), 'centre must stay finite');
+  }
+  // Even with nothing finite at all, the camera must still be placeable.
+  const allBad = createCloud(10);
+  allBad.positions.fill(NaN);
+  for (const b of [robustBounds(allBad), boundsOf(allBad)]) {
+    assert.ok(Number.isFinite(b.radius) && b.center.every(Number.isFinite));
+  }
 });

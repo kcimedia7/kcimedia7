@@ -17,6 +17,7 @@
     "host": "node ops/local/claude-local.mjs up",
     "host:lan": "node ops/local/claude-local.mjs up --lan",
     "stop": "node ops/local/claude-local.mjs down",
-    "status": "node ops/local/claude-local.mjs status"
+    "status": "node ops/local/claude-local.mjs status",
+    "inspect": "node ops/inspect-ply.mjs"
   }
 }

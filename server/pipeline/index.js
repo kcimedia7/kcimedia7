@@ -3,7 +3,7 @@ import path from 'node:path';
 import { decodePng, encodePng } from './png.js';
 import { fitWithin } from './imageops.js';
 import { encodePly, decodePly } from './ply.js';
-import { encodeSplatBuffer, boundsOf } from './splat.js';
+import { encodeSplatBuffer, boundsOf, filterCloud } from './splat.js';
 import { reconstructPreview } from './preview.js';
 import { detectCapabilities } from './backends.js';
 import { runColmap, runTrainer } from './colmap.js';
@@ -148,6 +148,8 @@ export async function convert(ctx) {
     progress.done('reconstruct');
   }
 
+  cloud = requireRenderableCloud(cloud, log);
+
   progress.enter('export');
   await fsp.mkdir(ctx.outputDir, { recursive: true });
 
@@ -197,6 +199,54 @@ export function pickEvenly(items, max) {
     out.push(items[Math.round((i * (items.length - 1)) / (max - 1))]);
   }
   return [...new Set(out)];
+}
+
+/**
+ * Refuse to present a model that cannot be seen as a finished conversion.
+ *
+ * When training diverges it still writes a well-formed PLY, and every signal
+ * the UI shows stays correct: the header count, the file size, the status. The
+ * viewer loads it, sorts it, reports a frame rate -- and draws nothing, because
+ * the values are NaN. That is the worst possible outcome, because it looks like
+ * a success and sends the user hunting through the renderer for a fault that is
+ * in the numbers.
+ *
+ * A few stray gaussians are dropped and the rest kept. Beyond a small fraction
+ * the reconstruction is not trustworthy even where it is finite, so the
+ * conversion fails and says why.
+ */
+export function requireRenderableCloud(cloud, log = () => {}) {
+  if (!cloud.count) {
+    throw new Error('Reconstruction produced no gaussians. The frames need more overlap, '
+      + 'more texture, or less motion blur.');
+  }
+
+  const finite = (i) => {
+    for (let k = 0; k < 3; k++) {
+      if (!Number.isFinite(cloud.positions[i * 3 + k])) return false;
+      if (!Number.isFinite(cloud.scales[i * 3 + k])) return false;
+    }
+    if (!Number.isFinite(cloud.opacities[i])) return false;
+    for (let k = 0; k < 4; k++) if (!Number.isFinite(cloud.rotations[i * 4 + k])) return false;
+    return true;
+  };
+
+  const cleaned = filterCloud(cloud, finite);
+  const dropped = cloud.count - cleaned.count;
+  if (!dropped) return cloud;
+
+  const share = dropped / cloud.count;
+  if (share > 0.01) {
+    throw new Error(
+      `Training diverged: ${dropped.toLocaleString()} of ${cloud.count.toLocaleString()} `
+      + `gaussians (${(share * 100).toFixed(1)}%) have non-finite values. The result would `
+      + 'load and render as an empty scene. This usually means the capture gave the solver '
+      + 'too little parallax -- walking straight towards a subject moves the camera along '
+      + 'its own view direction, which barely constrains depth. Orbit around the subject '
+      + 'instead, or re-run with fewer iterations.');
+  }
+  log(`dropped ${dropped} non-finite gaussian(s) of ${cloud.count}`);
+  return cleaned;
 }
 
 async function writeThumbnail(framePaths, outputDir) {
