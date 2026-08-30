@@ -326,6 +326,17 @@ Run it from the project directory — `npm run` needs the project's
 `package.json`, and a shell opened somewhere else (PowerShell starts in
 `C:\windows\system32`) will fail with `ENOENT ... package.json`.
 
+For a full picture in one command — environment, whether torch can see the GPU,
+every conversion with its status, and the training log alongside the model
+inspection:
+
+```
+npm run report             # newest conversion
+npm run report <id>        # a specific one
+```
+
+It prints only named environment variables, never the whole environment.
+
 It reports non-finite values, the opacity and scale distributions, and the scene
 extent, then names what would make the render blank. Note that the thumbnail on
 each library card is the **middle source frame**, not a render of the result —
