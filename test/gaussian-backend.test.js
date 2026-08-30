@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { parseProgress } from '../server/pipeline/gaussian.js';
 import { stagePlan } from '../server/pipeline/index.js';
 
@@ -57,7 +58,7 @@ test('the trainer CLI exposes the flags the backend invokes', () => {
   let help;
   try {
     help = execFileSync('python3', ['-m', 'splatworks_train.train', '--help'], {
-      cwd: new URL('../trainer/', import.meta.url).pathname,
+      cwd: fileURLToPath(new URL('../trainer/', import.meta.url)),
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
     });

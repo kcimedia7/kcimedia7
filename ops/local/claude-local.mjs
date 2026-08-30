@@ -22,6 +22,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawn, execFile } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
@@ -1085,6 +1086,25 @@ async function main() {
   }
 }
 
-const invokedDirectly = process.argv[1]
-  && path.resolve(process.argv[1]) === path.resolve(new URL(import.meta.url).pathname);
-if (invokedDirectly) main();
+/**
+ * Is this module the program the user actually launched?
+ *
+ * `new URL(import.meta.url).pathname` looks like the obvious answer and is
+ * wrong on Windows: it yields "/C:/Apps/..." with a leading slash, which never
+ * equals argv[1]'s "C:\\Apps\\...". The comparison silently fails, main()
+ * never runs, and the command exits 0 having printed nothing -- which is
+ * exactly how this presented. fileURLToPath understands drive letters.
+ *
+ * `windows` is a seam so the Windows behaviour can be tested from any platform.
+ */
+export function isMainModule(argv1, metaUrl, windows = process.platform === 'win32') {
+  if (!argv1) return false;
+  const impl = windows ? path.win32 : path.posix;
+  try {
+    return impl.resolve(argv1) === impl.resolve(fileURLToPath(metaUrl, { windows }));
+  } catch {
+    return false;
+  }
+}
+
+if (isMainModule(process.argv[1], import.meta.url)) main();

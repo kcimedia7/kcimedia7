@@ -373,3 +373,35 @@ test('windows-setup never writes the password into the task or shortcuts', async
   assert.match(xml, /LeastPrivilege/);
   assert.match(xml, /"up" --lan/);
 });
+
+test('the direct-invocation guard works on Windows paths', async () => {
+  const { isMainModule } = await import('../ops/local/claude-local.mjs');
+
+  // The exact shapes Windows produces. Comparing import.meta.url against a
+  // hand-built `file://${argv[1]}` (or using new URL().pathname, which yields a
+  // leading-slash "/C:/...") never matches here, so main() never ran and the
+  // command exited 0 having printed nothing. Observed on a real Windows host.
+  const winUrl = 'file:///C:/Apps/splatworks/ops/local/claude-local.mjs';
+  const winArgv = 'C:\\Apps\\splatworks\\ops\\local\\claude-local.mjs';
+  assert.equal(isMainModule(winArgv, winUrl, true), true, 'must run when launched directly on Windows');
+
+  // The old broken comparison, kept here so the regression is explicit.
+  assert.notEqual(
+    new URL(winUrl).pathname, winArgv,
+    'this mismatch is the bug: .pathname keeps a leading slash and forward slashes',
+  );
+
+  // Case and separator differences must not defeat it.
+  assert.equal(isMainModule('C:/Apps/splatworks/ops/local/claude-local.mjs', winUrl, true), true);
+
+  // A different file is still not the entrypoint.
+  assert.equal(isMainModule('C:\\Apps\\splatworks\\other.mjs', winUrl, true), false);
+
+  // POSIX keeps working.
+  const posixUrl = 'file:///home/user/app/ops/local/claude-local.mjs';
+  assert.equal(isMainModule('/home/user/app/ops/local/claude-local.mjs', posixUrl, false), true);
+  assert.equal(isMainModule('/home/user/app/other.mjs', posixUrl, false), false);
+
+  // Imported rather than launched: argv[1] is some other program.
+  assert.equal(isMainModule(undefined, winUrl, true), false);
+});

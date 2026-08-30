@@ -1,4 +1,6 @@
 import http from 'node:http';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createApiRouter } from './api.js';
 import { sendError, sendFile, resolveStatic } from './http/router.js';
 import * as store from './store.js';
@@ -81,7 +83,13 @@ export async function start() {
   return server;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// Comparing import.meta.url to a hand-built file:// URL breaks on Windows,
+// where import.meta.url is "file:///C:/..." and argv[1] is "C:\\...", so the
+// server would start only on POSIX and exit silently on Windows.
+const launchedDirectly = process.argv[1]
+  && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));
+
+if (launchedDirectly) {
   start().catch((err) => {
     console.error('failed to start:', err);
     process.exit(1);
