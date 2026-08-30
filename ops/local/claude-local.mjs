@@ -733,8 +733,24 @@ function readPid() {
 async function cmdDown() {
   const pid = readPid();
   if (!pid) { console.log(c.dim('not running')); return; }
-  process.kill(pid, 'SIGTERM');
-  console.log(`${c.green('stopped')} supervisor (pid ${pid})`);
+
+  if (IS_WINDOWS) {
+    // Windows has no real signals: Node maps process.kill(pid, 'SIGTERM') onto
+    // an unconditional terminate, so the supervisor dies before its shutdown
+    // handler can stop the servers it started. They survive, still holding
+    // their ports, and the next `up` fails on an address already in use.
+    // taskkill /T ends the whole tree instead, which is the guarantee SIGTERM
+    // gives on POSIX.
+    await new Promise((resolve) => {
+      const kill = spawn('taskkill', ['/PID', String(pid), '/T', '/F'],
+        { stdio: 'ignore', windowsHide: true });
+      kill.on('error', () => { try { process.kill(pid); } catch { /* gone */ } resolve(); });
+      kill.on('exit', resolve);
+    });
+  } else {
+    process.kill(pid, 'SIGTERM');
+  }
+  console.log(`${c.green('stopped')} supervisor (pid ${pid}) and the servers it started`);
 }
 
 async function cmdLogs(argv) {
