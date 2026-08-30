@@ -317,8 +317,14 @@ PLY, loads, sorts and reports a frame rate — and draws nothing. To find out
 which it is:
 
 ```
-npm run inspect data/assets/<id>/output/point_cloud.ply
+npm run inspect            # the newest conversion
+npm run inspect --list     # everything in the library
+npm run inspect <id>       # a specific conversion, or any .ply path
 ```
+
+Run it from the project directory — `npm run` needs the project's
+`package.json`, and a shell opened somewhere else (PowerShell starts in
+`C:\windows\system32`) will fail with `ENOENT ... package.json`.
 
 It reports non-finite values, the opacity and scale distributions, and the scene
 extent, then names what would make the render blank. Note that the thumbnail on

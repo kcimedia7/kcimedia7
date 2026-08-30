@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fsp from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { reconstructPreview } from '../server/pipeline/preview.js';
 import { pickEvenly, stagePlan, requireRenderableCloud } from '../server/pipeline/index.js';
 import { buildTrainerArgv, tokenize } from '../server/pipeline/colmap.js';
@@ -201,4 +204,36 @@ test('bounds stay placeable when positions are not finite', () => {
   for (const b of [robustBounds(allBad), boundsOf(allBad)]) {
     assert.ok(Number.isFinite(b.radius) && b.center.every(Number.isFinite));
   }
+});
+
+test('the inspector finds conversions without being handed a path', async () => {
+  // Assembling a path into a directory you have never opened is where
+  // diagnosing a bad conversion actually fails, so the tool resolves the
+  // library itself and reports the newest conversion first.
+  const { listConversions } = await import('../ops/inspect-ply.mjs');
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'splat-inspect-'));
+  const assets = path.join(dir, 'assets');
+  for (const [id, when] of [['aaa', 1000], ['bbb', 3000], ['ccc', 2000]]) {
+    const out = path.join(assets, id, 'output');
+    await fsp.mkdir(out, { recursive: true });
+    const ply = path.join(out, 'point_cloud.ply');
+    await fsp.writeFile(ply, 'ply\n');
+    await fsp.utimes(ply, new Date(when), new Date(when));
+  }
+  // An asset directory with no model must not appear as a conversion.
+  await fsp.mkdir(path.join(assets, 'ddd', 'frames'), { recursive: true });
+  await fsp.writeFile(path.join(dir, 'library.json'),
+    JSON.stringify([{ id: 'bbb', name: 'the street' }]));
+
+  const found = listConversions(assets, path.join(dir, 'library.json'));
+  assert.deepEqual(found.map((f) => f.id), ['bbb', 'ccc', 'aaa'], 'newest must come first');
+  assert.equal(found[0].name, 'the street', 'names come from the library index');
+  assert.equal(found[1].name, '', 'a missing name is not an error');
+
+  // A missing library index must not stop the listing.
+  const noDb = listConversions(assets, path.join(dir, 'gone.json'));
+  assert.equal(noDb.length, 3);
+  assert.equal(listConversions(path.join(dir, 'nothing-here')).length, 0);
+
+  await fsp.rm(dir, { recursive: true, force: true });
 });
