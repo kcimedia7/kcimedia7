@@ -244,7 +244,7 @@ async function handleUpload(req, res) {
       maxBytes: MAX_UPLOAD_BYTES,
       onField(name, value) {
         if (name === 'name') meta.name = value.trim().slice(0, 160);
-        else if (name === 'kind') meta.kind = value === 'video' ? 'video' : 'photos';
+        else if (name === 'kind') meta.kind = KINDS.has(value) ? value : 'photos';
         else if (name === 'settings') {
           try { meta.settings = sanitiseSettings(JSON.parse(value)); } catch { /* keep defaults */ }
         }
@@ -286,10 +286,15 @@ async function handleUpload(req, res) {
   sendJson(res, 201, { asset: store.getAssetView(asset.id) });
 }
 
+/** Capture kinds the store recognises; anything else is treated as photos. */
+const KINDS = new Set(['photos', 'video', 'pano']);
+
+const KIND_LABEL = { photos: 'Photo', video: 'Video', pano: '360' };
+
 function defaultName(kind, sourceFiles) {
   if (sourceFiles.length === 1) return sourceFiles[0].name.replace(/\.[^.]+$/, '');
   const when = new Date().toLocaleString();
-  return `${kind === 'video' ? 'Video' : 'Photo'} capture — ${when}`;
+  return `${KIND_LABEL[kind] || 'Photo'} capture — ${when}`;
 }
 
 export function sanitiseSettings(input) {

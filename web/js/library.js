@@ -1,6 +1,9 @@
 import { el, clear, relativeTime, formatCount } from './ui.js';
 import { api } from './api.js';
 
+/** How each capture kind is described in the library and detail views. */
+const SOURCE_LABEL = { photos: 'Photos', video: 'Video', pano: '360 panorama' };
+
 /**
  * The library: every conversion ever run, searchable, with live status for the
  * ones still working.
@@ -129,7 +132,7 @@ function tile(asset, onOpen) {
       el('div', { class: 'tile-name' }, asset.name),
       el('div', { class: 'tile-meta' },
         el('span', { class: `badge ${asset.status}` }, statusLabel(asset)),
-        el('span', {}, asset.kind === 'video' ? 'Video' : 'Photos'),
+        el('span', {}, SOURCE_LABEL[asset.kind] || 'Photos'),
         asset.result?.splatCount
           ? el('span', {}, `${formatCount(asset.result.splatCount)} gaussians`)
           : null,

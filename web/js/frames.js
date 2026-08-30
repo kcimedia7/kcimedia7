@@ -7,6 +7,11 @@
  * it, and means the server only ever receives normalised PNG frames.
  */
 
+import {
+  CUBE_FACES, DEFAULT_FACE_FOV_DEG, MAX_PANO_EDGE, decodeRadianceHdr, toneMap,
+  equirectToPerspective, looksEquirectangular, isHdrFile, isExrFile,
+} from './pano.js';
+
 const DEFAULT_MAX_DIM = 640;
 
 export function isVideo(file) {
@@ -14,7 +19,9 @@ export function isVideo(file) {
 }
 
 export function isImage(file) {
-  return file.type.startsWith('image/') || /\.(jpe?g|png|webp|gif|avif|heic|heif|bmp)$/i.test(file.name);
+  return file.type.startsWith('image/')
+    || /\.(jpe?g|png|webp|gif|avif|heic|heif|bmp)$/i.test(file.name)
+    || isHdrFile(file);
 }
 
 /**
@@ -24,13 +31,23 @@ export function isImage(file) {
  * @param {object} options
  * @param {number} [options.targetFrames]  how many frames to pull from a video
  * @param {number} [options.maxDim]        longest edge of each extracted frame
+ * @param {number} [options.faceFovDeg]  field of view of each panorama view
  * @param {(p: {done: number, total: number, label: string}) => void} [options.onProgress]
- * @returns {Promise<{frames: Blob[], kind: 'photos'|'video', previews: string[]}>}
+ * @returns {Promise<{frames: Blob[], kind: 'photos'|'video'|'pano', previews: string[]}>}
  */
 export async function extractFrames(files, options = {}) {
   const maxDim = options.maxDim || DEFAULT_MAX_DIM;
   const targetFrames = options.targetFrames || 32;
   const onProgress = options.onProgress || (() => {});
+
+  // Checked against the raw selection, before anything is filtered out: an
+  // .exr is not an image this build can read, so the format filter would drop
+  // it and the user would be told only that nothing was usable.
+  const exr = files.find(isExrFile);
+  if (exr) {
+    throw new Error(`${exr.name} is an OpenEXR file, which this build cannot read. `
+      + 'Save it as Radiance .hdr, or as a JPEG if it is already tone mapped.');
+  }
 
   const videos = files.filter(isVideo);
   const images = files.filter((f) => !isVideo(f) && isImage(f));
@@ -38,12 +55,50 @@ export async function extractFrames(files, options = {}) {
     throw new Error('Select photos or a video — nothing else can be converted.');
   }
 
+  // A panorama has to be identified before it is treated as a photo, and for
+  // ordinary image formats that means looking at its dimensions rather than
+  // its name: a 360 shot from a Theta or an Insta360 arrives as a plain JPEG.
+  const classified = [];
+  for (const file of images) {
+    classified.push({ file, pano: await isPanorama(file) });
+  }
+  const panos = classified.filter((c) => c.pano);
+  const photos = classified.filter((c) => !c.pano);
+
+  // Panoramas are resampled into square views, and structure-from-motion here
+  // fits one shared camera to the whole capture -- which it enforces by
+  // skipping every image of a different shape. Mixing would therefore drop one
+  // group or the other on the server, so it is refused where the reason can
+  // still be explained.
+  if (panos.length && (photos.length || videos.length)) {
+    const other = photos.length && videos.length ? 'photos and video'
+      : (photos.length ? 'ordinary photos' : 'video');
+    throw new Error(`360 panoramas cannot be combined with ${other} in one conversion — `
+      + 'they become square views that no single camera model fits. '
+      + 'Convert the panoramas on their own, then the rest separately.');
+  }
+
   const frames = [];
   const previews = [];
-  const total = images.length + videos.length * targetFrames;
+  const total = photos.length + panos.length * CUBE_FACES.length + videos.length * targetFrames;
   let done = 0;
 
-  for (const file of images) {
+  for (const { file } of panos) {
+    const views = await framesFromPano(file, {
+      size: maxDim,
+      fovDeg: options.faceFovDeg || DEFAULT_FACE_FOV_DEG,
+      onProgress: (i, name) => onProgress({
+        done: done + i, total, label: `Reprojecting ${file.name} (${name})`,
+      }),
+    });
+    for (const blob of views) {
+      frames.push(blob);
+      if (previews.length < 8) previews.push(URL.createObjectURL(blob));
+    }
+    done += views.length;
+  }
+
+  for (const { file } of photos) {
     const blob = await frameFromImage(file, maxDim);
     frames.push(blob);
     if (previews.length < 8) previews.push(URL.createObjectURL(blob));
@@ -66,7 +121,111 @@ export async function extractFrames(files, options = {}) {
   }
 
   if (!frames.length) throw new Error('No frames could be read from that selection.');
-  return { frames, kind: videos.length ? 'video' : 'photos', previews };
+  const kind = videos.length ? 'video' : (panos.length && !photos.length ? 'pano' : 'photos');
+  return { frames, kind, previews, panoCount: panos.length };
+}
+
+/**
+ * Is this file a 360 photo?
+ *
+ * Radiance files are panoramas by convention -- the format exists for
+ * environment capture -- but an ordinary JPEG has to be measured. The 2:1
+ * aspect ratio of an equirectangular projection is the only signal available
+ * without reading vendor-specific metadata, and `createImageBitmap` is the
+ * cheapest way to get dimensions without decoding into a canvas.
+ */
+export async function isPanorama(file) {
+  if (isHdrFile(file)) return true;
+  let bitmap;
+  try {
+    bitmap = await createImageBitmap(file);
+  } catch {
+    return false; // undecodable files are reported by the photo path instead
+  }
+  try {
+    return looksEquirectangular(bitmap.width, bitmap.height);
+  } finally {
+    bitmap.close?.();
+  }
+}
+
+/**
+ * Resample one panorama into the six perspective views the pipeline can use.
+ *
+ * The panorama itself never reaches the server: what goes up are ordinary
+ * pinhole frames that structure-from-motion can pose, which is the whole point
+ * of doing this here rather than shipping a 100 MB HDR over the network.
+ */
+async function framesFromPano(file, { size, fovDeg, onProgress }) {
+  const source = isHdrFile(file) ? await readHdr(file) : await readLdrPano(file);
+  if (!looksEquirectangular(source.width, source.height, 0.06)) {
+    throw new Error(`${file.name} is ${source.width}x${source.height}, which is not the 2:1 `
+      + 'shape of an equirectangular 360 photo.');
+  }
+  const out = [];
+  for (const face of CUBE_FACES) {
+    const view = equirectToPerspective(source, face, { size, fovDeg });
+    out.push(await imageDataToPng(view));
+    onProgress?.(out.length, face.name);
+  }
+  return out;
+}
+
+/** Decode a Radiance HDR and tone map it to the 8-bit colour splats store. */
+async function readHdr(file) {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let decoded;
+  try {
+    decoded = decodeRadianceHdr(bytes, { maxEdge: MAX_PANO_EDGE });
+  } catch (err) {
+    throw new Error(`${file.name} could not be read as a Radiance HDR: ${err.message}`);
+  }
+  return {
+    width: decoded.width,
+    height: decoded.height,
+    data: toneMap(decoded.data, decoded.width, decoded.height),
+  };
+}
+
+/** Decode an already-tone-mapped equirectangular image through the canvas. */
+async function readLdrPano(file) {
+  let bitmap;
+  try {
+    // Resizing during decode keeps a 16k panorama from ever existing as a
+    // full-size bitmap; the aspect ratio is preserved so the 2:1 check still
+    // means what it says.
+    bitmap = await createImageBitmap(file, {
+      resizeWidth: MAX_PANO_EDGE,
+      resizeQuality: 'high',
+      imageOrientation: 'from-image',
+    });
+  } catch {
+    throw new Error(`${file.name} could not be decoded by this browser.`);
+  }
+  try {
+    const canvas = document.createElement('canvas');
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
+    const ctx = canvas.getContext('2d', { alpha: false, willReadFrequently: true });
+    ctx.drawImage(bitmap, 0, 0);
+    const image = ctx.getImageData(0, 0, bitmap.width, bitmap.height);
+    return { width: image.width, height: image.height, data: image.data };
+  } finally {
+    bitmap.close?.();
+  }
+}
+
+/** Wrap raw RGBA in a canvas and encode it as the PNG the server expects. */
+async function imageDataToPng({ width, height, data }) {
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d', { alpha: false });
+  ctx.putImageData(new ImageData(new Uint8ClampedArray(data.buffer, data.byteOffset, data.length),
+    width, height), 0, 0);
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+  if (!blob) throw new Error('This browser refused to encode a panorama view.');
+  return blob;
 }
 
 async function frameFromImage(file, maxDim) {

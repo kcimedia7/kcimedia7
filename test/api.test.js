@@ -26,9 +26,16 @@ const server = createServer();
 await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
 const base = `http://127.0.0.1:${server.address().port}`;
 
+const jobs = await import('../server/jobs.js');
+
 test.after(async () => {
+  // Closing the listener does not stop a conversion already in flight, and a
+  // job still writing into the data directory turns the cleanup below into an
+  // ENOTEMPTY race that only shows up on some runs.
+  const drained = await jobs.drain();
   await new Promise((resolve) => server.close(resolve));
   await fsp.rm(dataDir, { recursive: true, force: true });
+  assert.ok(drained, 'a conversion was still running when the suite finished');
 });
 
 function testFrame(seed) {
@@ -47,10 +54,10 @@ function testFrame(seed) {
   return encodePng({ width, height, data });
 }
 
-async function uploadCapture({ name = 'Test capture', frames = 6, settings = {} } = {}) {
+async function uploadCapture({ name = 'Test capture', frames = 6, settings = {}, kind = 'photos' } = {}) {
   const form = new FormData();
   form.append('name', name);
-  form.append('kind', 'photos');
+  form.append('kind', kind);
   form.append('settings', JSON.stringify({ detail: 48, ...settings }));
   for (let i = 0; i < frames; i++) {
     form.append('frame', new Blob([testFrame(i * 6)], { type: 'image/png' }), `frame_${i}.png`);
@@ -298,4 +305,24 @@ test('the splat endpoint honours byte ranges', async () => {
   assert.equal(res.status, 206);
   assert.equal(res.headers.get('content-range'), `bytes 0-31/${ready.result.splatBytes}`);
   assert.equal((await res.arrayBuffer()).byteLength, 32);
+});
+
+test('a 360 capture is stored and reported as its own kind', async () => {
+  // Panorama captures are resampled into perspective views before upload, so
+  // the server sees ordinary frames. Only the kind distinguishes them, and if
+  // it were silently folded into 'photos' the library would mislabel every
+  // 360 conversion.
+  const asset = await uploadCapture({ name: '360 room', kind: 'pano', frames: 6 });
+  assert.equal(asset.kind, 'pano');
+
+  const res = await fetch(`${base}/api/assets/${asset.id}`);
+  const { asset: fetched } = await res.json();
+  assert.equal(fetched.kind, 'pano', 'the kind must survive a round trip through the store');
+});
+
+test('an unknown capture kind falls back to photos rather than being stored', async () => {
+  // The kind reaches the UI as a label, so an arbitrary string from a client
+  // must not end up rendered there.
+  const asset = await uploadCapture({ name: 'odd', kind: 'not-a-kind', frames: 4 });
+  assert.equal(asset.kind, 'photos');
 });

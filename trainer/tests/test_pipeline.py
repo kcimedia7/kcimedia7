@@ -156,3 +156,45 @@ def test_render_matches_the_input_images(dataset, tmp_path):
         f"per-tile cap truncated {int(info['overflow_tiles'])} tiles "
         f"(peak occupancy {int(info['max_occupancy'])}); the render is not what the model says"
     )
+
+
+def test_mixed_image_sizes_fail_loudly_instead_of_dropping_frames(tmp_path):
+    """A single shared camera makes COLMAP skip odd-sized images silently.
+
+    It logs a warning and carries on, so the reconstruction quietly runs on a
+    subset. Since 360 panoramas are resampled into square views, mixing them
+    with ordinary photos would hit this every time -- and look like a weak
+    capture rather than like dropped input.
+    """
+    import numpy as np
+    import pycolmap
+    from PIL import Image
+    from splatworks_train.sfm import _check_nothing_was_dropped
+
+    images = tmp_path / "images"
+    images.mkdir()
+    rng = np.random.default_rng(0)
+    for i in range(3):
+        Image.fromarray(rng.integers(0, 255, (96, 96, 3), dtype=np.uint8)).save(
+            images / f"square_{i}.png")
+
+    work = tmp_path / "work"
+    work.mkdir()
+    database = work / "db.db"
+    pycolmap.extract_features(
+        database_path=database, image_path=images,
+        camera_mode=pycolmap.CameraMode.SINGLE,
+    )
+    # All one size: nothing was dropped, so the check must stay out of the way.
+    _check_nothing_was_dropped(database, images)
+
+    # Add an image of a different shape and the extractor starts skipping.
+    Image.fromarray(rng.integers(0, 255, (72, 128, 3), dtype=np.uint8)).save(
+        images / "wide_0.png")
+    database.unlink()
+    pycolmap.extract_features(
+        database_path=database, image_path=images,
+        camera_mode=pycolmap.CameraMode.SINGLE,
+    )
+    with pytest.raises(RuntimeError, match="same dimensions"):
+        _check_nothing_was_dropped(database, images)

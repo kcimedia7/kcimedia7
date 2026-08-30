@@ -90,6 +90,7 @@ def run_sfm(image_dir, work_dir, matcher="sequential", log=print):
         # better than solving a separate camera per image.
         camera_mode=pycolmap.CameraMode.SINGLE,
     )
+    _check_nothing_was_dropped(database, image_dir)
 
     log(f"sfm: matching ({matcher})")
     if matcher == "exhaustive":
@@ -140,3 +141,38 @@ def scene_extent(views) -> float:
     centres = np.stack([v.camera_centre for v in views])
     centre = centres.mean(axis=0)
     return float(np.linalg.norm(centres - centre, axis=1).max() * 1.1) or 1.0
+
+
+# Image suffixes COLMAP will attempt to read.
+_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".ppm", ".pgm"}
+
+
+def _check_nothing_was_dropped(database_path, image_dir) -> None:
+    """Fail loudly when the feature extractor skipped images.
+
+    A single shared camera is the right model for frames that came from one
+    physical lens, and it constrains the solve far better than one camera per
+    image. But COLMAP enforces it by *skipping* any image whose dimensions
+    differ from the first, and it does so with a warning buried in its log
+    rather than an error. The reconstruction then succeeds on a subset, which
+    looks like a thin capture rather than like the bug it is.
+
+    Mixed dimensions in one capture is not a corner case here: a 360 panorama
+    is resampled into square views, so panoramas and ordinary photos uploaded
+    together would leave one group silently unused.
+    """
+    on_disk = sorted(
+        p.name for p in Path(image_dir).iterdir()
+        if p.is_file() and p.suffix.lower() in _IMAGE_SUFFIXES
+    )
+    with pycolmap.Database.open(str(database_path)) as db:
+        kept = {img.name for img in db.read_all_images()}
+    missing = [name for name in on_disk if name not in kept]
+    if not missing:
+        return
+    raise RuntimeError(
+        f"COLMAP skipped {len(missing)} of {len(on_disk)} images, which happens when "
+        f"they do not all share the same dimensions (first skipped: {missing[0]}). "
+        "Frames from one capture must be the same size -- 360 panoramas become "
+        "square views and cannot be combined with ordinary photos in one conversion."
+    )

@@ -5,6 +5,9 @@ import {
 import { api } from './api.js';
 import { SplatViewer } from './viewer/renderer.js';
 
+/** How each capture kind is described in the library and detail views. */
+const SOURCE_LABEL = { photos: 'Photos', video: 'Video', pano: '360 panorama' };
+
 /**
  * Detail view: the splat on the left, everything you can do to it on the right.
  *
@@ -180,7 +183,7 @@ export function renderDetail(host, { asset, onDeleted, onChanged }) {
     const r = current.result;
     const rows = el('dl', { class: 'rows' },
       row('Status', current.status),
-      row('Source', current.kind === 'video' ? 'Video' : 'Photos'),
+      row('Source', SOURCE_LABEL[current.kind] || 'Photos'),
       row('Frames used', formatCount(current.source?.frameCount)),
       row('Backend', current.backend || '—'),
       r ? row('Gaussians', formatCount(r.splatCount)) : null,

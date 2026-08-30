@@ -45,6 +45,27 @@ export function cancel(assetId) {
   return false;
 }
 
+/**
+ * Stop every job and wait for the running ones to actually let go.
+ *
+ * Aborting a conversion is not instant: the pipeline notices the signal between
+ * stages, and until it does it is still writing frames and output files. Anyone
+ * who tears down the data directory before that -- a test, a shutdown path --
+ * races a live writer and gets ENOTEMPTY from a directory that was empty a
+ * moment earlier.
+ *
+ * @returns {Promise<boolean>} false if a job was still running at the deadline
+ */
+export async function drain({ timeoutMs = 10_000 } = {}) {
+  queue.length = 0;
+  for (const controller of running.values()) controller.abort();
+  const deadline = Date.now() + timeoutMs;
+  while (running.size && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  return running.size === 0;
+}
+
 export function queueState() {
   return { running: [...running.keys()], queued: [...queue], limit: MAX_CONCURRENT_JOBS };
 }

@@ -125,6 +125,31 @@ This matters more than any setting:
 - Move steadily. Motion blur costs more detail than a lower frame count.
 - 20–60 photos, or a slow 10–30 second orbit video, is a good target.
 
+### 360 panoramas
+
+Equirectangular 360 photos are accepted directly, as JPEG/PNG or as Radiance
+`.hdr`. Each one is resampled in the browser into six overlapping perspective
+views before upload, because an equirectangular image is a spherical projection
+and structure-from-motion models a pinhole camera — feeding one in unchanged
+does not fail, it fits the wrong model and returns plausible nonsense.
+
+The thing to understand before shooting:
+
+- **One panorama cannot produce real geometry.** Depth comes from parallax, and
+  a single 360 shot has one optical centre. You get a textured shell around the
+  camera, not measured structure. The app says so when you select one file.
+- **Shoot two or more, a step or two apart.** A 360 camera carried through a
+  room, stopping every metre or so, is excellent capture data — each stop covers
+  the whole room at once, so coverage is far better than a phone can manage.
+- **Panoramas cannot be mixed with ordinary photos** in one conversion. They
+  become square views, and the solver fits one shared camera to a capture, which
+  it enforces by skipping images of any other shape.
+- **HDR is tone mapped on the way in.** Splats store 8-bit colour, so the range
+  has to collapse somewhere; doing it deliberately keeps detail in both the
+  windows and the shadows, where a plain conversion would clip the highlights to
+  featureless white.
+- **OpenEXR is not supported.** Save as `.hdr` instead.
+
 ---
 
 ## Configuration

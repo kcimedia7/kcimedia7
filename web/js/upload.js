@@ -1,5 +1,6 @@
 import { el, clear, toast, formatBytes } from './ui.js';
-import { extractFrames, isVideo } from './frames.js';
+import { extractFrames, isVideo, isPanorama } from './frames.js';
+import { CUBE_FACES } from './pano.js';
 import { api } from './api.js';
 
 /**
@@ -9,11 +10,15 @@ import { api } from './api.js';
  * biggest determinant of splat quality is how the source was shot.
  */
 
+/** How many perspective views each panorama is resampled into. */
+const PANO_VIEWS = CUBE_FACES.length;
+
 const CAPTURE_TIPS = [
   'Walk a full circle around the subject, keeping it centred in frame.',
   'Overlap generously — each shot should share most of its view with the last.',
   'Keep lighting constant and avoid reflective or featureless surfaces.',
   'Move steadily; motion blur costs more detail than a lower frame count.',
+  'Shooting 360 panoramas? Take several from different spots, not one from the middle.',
 ];
 
 export function renderUpload(host, { capabilities, onCreated }) {
@@ -30,7 +35,9 @@ export function renderUpload(host, { capabilities, onCreated }) {
   const fileInput = el('input', {
     type: 'file',
     multiple: true,
-    accept: 'image/*,video/*',
+    // .hdr carries no registered MIME type, so it must be named explicitly
+    // or the file picker will grey it out.
+    accept: 'image/*,video/*,.hdr',
     class: 'sr-only',
     onchange: () => setFiles([...fileInput.files]),
   });
@@ -49,10 +56,12 @@ export function renderUpload(host, { capabilities, onCreated }) {
       setFiles([...e.dataTransfer.files]);
     },
   },
-    el('h3', {}, 'Drop photos or a video here'),
-    el('p', {}, 'or click to browse — a 20–60 shot orbit, or a slow walk-around clip'));
+    el('h3', {}, 'Drop photos, a video, or 360 panoramas here'),
+    el('p', {}, 'or click to browse — a 20–60 shot orbit, a slow walk-around clip, '
+      + 'or several 360 shots taken a step or two apart'));
 
   const summary = el('div', { class: 'preview-strip' });
+  const panoNote = el('div', { class: 'note', style: { display: 'none' } });
   const nameInput = el('input', { type: 'text', placeholder: 'Name this capture' });
 
   const framesSlider = numberField('Frames to sample from video', 8, 120, 4, state.settings.targetFrames,
@@ -102,7 +111,7 @@ export function renderUpload(host, { capabilities, onCreated }) {
     capabilities?.backend === 'preview' ? previewNotice(capabilities) : reconstructionNotice(capabilities),
 
     el('div', { class: 'upload-grid' },
-      el('div', { class: 'card' }, fileInput, dropzone, summary, progressWrap),
+      el('div', { class: 'card' }, fileInput, dropzone, summary, panoNote, progressWrap),
       el('div', { class: 'card' },
         el('h2', {}, 'Settings'),
         el('label', { class: 'field' },
@@ -119,7 +128,7 @@ export function renderUpload(host, { capabilities, onCreated }) {
 
   function setFiles(files) {
     const usable = files.filter((f) => f.type.startsWith('image/') || f.type.startsWith('video/')
-      || /\.(jpe?g|png|webp|heic|heif|mp4|mov|m4v|webm)$/i.test(f.name));
+      || /\.(jpe?g|png|webp|heic|heif|hdr|mp4|mov|m4v|webm)$/i.test(f.name));
     if (!usable.length) {
       toast('None of those files look like photos or video.', 'error');
       return;
@@ -137,6 +146,34 @@ export function renderUpload(host, { capabilities, onCreated }) {
         : `Capture — ${new Date().toLocaleDateString()}`;
     }
     framesSlider.style.display = videos ? '' : 'none';
+    describePanoramas(usable);
+  }
+
+  /**
+   * Say plainly what a single panorama can and cannot produce.
+   *
+   * One 360 photo has one optical centre. Depth comes from parallax -- the same
+   * point seen from two different places -- so a lone panorama contains no
+   * depth information at any resolution, and no amount of processing recovers
+   * it. The conversion will still run and still produce something viewable,
+   * but it is a textured shell at one radius, not measured geometry. Better to
+   * say so before the wait than to let the result imply otherwise.
+   */
+  async function describePanoramas(files) {
+    const flags = await Promise.all(files.map((f) => isPanorama(f).catch(() => false)));
+    const panos = flags.filter(Boolean).length;
+    if (!panos) { panoNote.style.display = 'none'; return; }
+    panoNote.style.display = '';
+    clear(panoNote).append(
+      el('strong', {}, panos === 1 ? 'One 360 photo detected' : `${panos} 360 photos detected`),
+      el('p', {}, panos === 1
+        ? 'A single panorama is taken from one point, so it carries no parallax and '
+          + 'cannot yield real depth. You will get a textured shell around the camera '
+          + 'rather than measured geometry. For a true reconstruction, shoot two or more '
+          + 'panoramas a step or two apart.'
+        : `Each panorama becomes ${PANO_VIEWS} perspective views, so ${panos} shots upload as `
+          + `${panos * PANO_VIEWS} frames. Reconstruction quality depends on the panoramas `
+          + 'being taken from genuinely different positions, not just different angles.'));
   }
 
   function setProgress(fraction, label) {
