@@ -137,6 +137,7 @@ All optional.
 | `SPLAT_DATA_DIR` | `./data` | where the library and assets live |
 | `SPLAT_BACKEND` | `auto` | force `preview` or `colmap` |
 | `SPLAT_TRAINER_CMD` | — | trainer command template (see above) |
+| `SPLAT_TRAIN_DEVICE` | `cpu` | `cuda` to train on an NVIDIA GPU with the bundled trainer |
 | `SPLAT_COLMAP_CMD` | `colmap` | COLMAP executable |
 | `SPLAT_CONCURRENCY` | `1` | conversions running at once |
 | `SPLAT_MAX_UPLOAD` | 2 GiB | per-request upload ceiling |

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { parseProgress } from '../server/pipeline/gaussian.js';
+import { parseProgress, resolveDevice } from '../server/pipeline/gaussian.js';
 import { stagePlan } from '../server/pipeline/index.js';
 
 /**
@@ -66,7 +66,28 @@ test('the trainer CLI exposes the flags the backend invokes', () => {
     return; // trainer dependencies absent; detection covers that path
   }
   for (const flag of ['--images', '--output', '--work', '--iterations',
-                      '--resolution', '--max-gaussians', '--matcher']) {
+                      '--resolution', '--max-gaussians', '--matcher',
+                      '--device']) {
     assert.ok(help.includes(flag), `trainer CLI is missing ${flag}`);
+  }
+});
+
+test('the training device defaults to cpu and honours an explicit request', () => {
+  // CPU is the only device guaranteed to exist, so nothing about a GPU may
+  // become a precondition for converting.
+  assert.equal(resolveDevice(undefined, {}), 'cpu');
+  assert.equal(resolveDevice('cuda', {}), 'cuda');
+  assert.equal(resolveDevice(' CUDA:1 ', {}), 'cuda:1');
+  // The environment is the fallback the host tooling sets, not an override.
+  assert.equal(resolveDevice(undefined, { SPLAT_TRAIN_DEVICE: 'cuda' }), 'cuda');
+  assert.equal(resolveDevice('cpu', { SPLAT_TRAIN_DEVICE: 'cuda' }), 'cpu');
+});
+
+test('an unusable training device is rejected before Python is launched', () => {
+  // Catching this here costs a millisecond; catching it in torch costs the
+  // minutes of structure-from-motion that run before the first render.
+  for (const bad of ['gpu', 'mps', 'cuda:', 'cuda:x', 'cpu; rm -rf /']) {
+    assert.throws(() => resolveDevice(bad, {}), /device must be/,
+      `${bad} should not reach the trainer`);
   }
 });

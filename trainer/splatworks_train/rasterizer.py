@@ -216,15 +216,22 @@ def rasterize(
 
     # How much the cap actually bit, so truncation is measurable rather than
     # an invisible quality ceiling.
+    #
+    # These stay as tensors deliberately. Calling .item() here would force a
+    # device-to-host synchronisation on every rasterised frame, which costs
+    # nothing on CPU but stalls the pipeline on a GPU. The caller converts them
+    # only on the iterations it actually logs.
     with torch.no_grad():
         occupancy = touches.sum(dim=1)
-        overflow_tiles = int((occupancy > k).sum().item())
+        overflow_tiles = (occupancy > k).sum()
+        max_occupancy = occupancy.max() if occupancy.numel() else torch.zeros(
+            (), dtype=torch.long, device=device)
 
     return image, {
         "means2d": means2d,
         "radius": radius,
         "visible": visible,
-        "n_rendered": int(valid.sum().item()),
+        "n_rendered": valid.sum(),
         "overflow_tiles": overflow_tiles,
-        "max_occupancy": int(occupancy.max().item()) if occupancy.numel() else 0,
+        "max_occupancy": max_occupancy,
     }

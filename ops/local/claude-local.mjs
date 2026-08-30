@@ -146,7 +146,13 @@ export function classifyGpu(name = '', computeCap = null) {
     return { usable: false, cap: null, reason: 'could not determine compute capability' };
   }
   if (cap >= MIN_TORCH_CAP) {
-    return { usable: true, cap, reason: null };
+    // Blackwell (sm_120) is newer than the architectures the stable PyTorch
+    // wheels are compiled for, which stop at sm_90. Installing the default
+    // wheel on a 50-series card gets you "no kernel image is available for
+    // execution on the device" -- a confusing failure that no driver update
+    // fixes, so name the build that does work.
+    const wheel = cap >= 12 ? 'cu128' : 'cu121';
+    return { usable: true, cap, wheel, reason: null };
   }
   const era = cap < 3 ? 'Fermi' : cap < 3.5 ? 'Kepler' : cap < 5.3 ? 'Maxwell'
     : cap < 7 ? 'Pascal' : 'Volta';
@@ -820,10 +826,33 @@ async function cmdDoctor() {
 
   console.log('\n' + c.bold('gaussian splat training on this machine:'));
   if (gpu && verdict.usable) {
-    console.log('  This GPU can run CUDA training. For full-quality reconstruction install a');
-    console.log('  GPU trainer and point the app at it:');
-    console.log(c.dim('    SPLAT_TRAINER_CMD="python /opt/gaussian-splatting/train.py \\'));
-    console.log(c.dim('      -s {source} -m {output} --iterations {iterations}"'));
+    const wheel = verdict.wheel || 'cu121';
+    console.log(`  ${c.green(gpu.name)} can run CUDA training`
+      + (verdict.cap ? c.dim(`  (compute capability ${verdict.cap})`) : ''));
+    console.log('');
+    console.log('  The bundled trainer is plain PyTorch, so it runs on this GPU directly.');
+    console.log('  Install a CUDA build of PyTorch -- the default wheel is CPU-only on');
+    console.log(`  Windows, and on this card you need the ${c.bold(wheel)} build specifically:`);
+    console.log(c.dim(`    pip install torch --index-url https://download.pytorch.org/whl/${wheel}`));
+    console.log(c.dim('    pip install pycolmap numpy pillow'));
+    console.log('');
+    console.log('  Check it took:');
+    console.log(c.dim('    python -c "import torch;print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"'));
+    console.log('');
+    console.log('  Then convert with the GPU instead of the CPU:');
+    // Printing a POSIX assignment on Windows would be advice that silently
+    // does nothing -- cmd and PowerShell each spell this a third way.
+    console.log(c.dim(IS_WINDOWS
+      ? '    $env:SPLAT_TRAIN_DEVICE = "cuda"     (PowerShell, this window only)'
+      : '    export SPLAT_TRAIN_DEVICE=cuda'));
+    if (IS_WINDOWS) {
+      console.log(c.dim('    setx SPLAT_TRAIN_DEVICE cuda          (permanent, new windows only)'));
+    }
+    if (verdict.cap >= 12) {
+      console.log(c.yellow('\n  This is a Blackwell card. The stable PyTorch wheels stop at sm_90, so'));
+      console.log(c.yellow('  the default install fails with "no kernel image is available for'));
+      console.log(c.yellow(`  execution on the device". The ${wheel} build is not optional here.`));
+    }
   } else if (gpu) {
     console.log(`  ${c.yellow(gpu.name)} cannot run it: ${verdict.reason}.`);
     console.log('  This is a hard limit, not a slow path -- no combination of drivers');

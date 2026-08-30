@@ -152,7 +152,7 @@ def test_render_matches_the_input_images(dataset, tmp_path):
     assert image.shape == (view["height"], view["width"], 3)
     assert float(image.max()) > 0.05, "nothing was rendered"
     assert psnr(image, view["image"]) > 5.0
-    assert info["overflow_tiles"] == 0, (
-        f"per-tile cap truncated {info['overflow_tiles']} tiles "
-        f"(peak occupancy {info['max_occupancy']}); the render is not what the model says"
+    assert int(info["overflow_tiles"]) == 0, (
+        f"per-tile cap truncated {int(info['overflow_tiles'])} tiles "
+        f"(peak occupancy {int(info['max_occupancy'])}); the render is not what the model says"
     )
