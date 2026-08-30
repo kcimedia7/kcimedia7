@@ -12,6 +12,11 @@
     "dev": "node --watch server/index.js",
     "test": "node --test \"test/**/*.test.js\"",
     "test:ops": "bash ops/tests/test_ops.sh",
-    "test:all": "npm test && npm run test:ops"
+    "test:all": "npm test && npm run test:ops",
+    "doctor": "node ops/local/claude-local.mjs doctor",
+    "host": "node ops/local/claude-local.mjs up",
+    "host:lan": "node ops/local/claude-local.mjs up --lan",
+    "stop": "node ops/local/claude-local.mjs down",
+    "status": "node ops/local/claude-local.mjs status"
   }
 }
