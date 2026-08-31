@@ -94,6 +94,11 @@ export async function convert(ctx) {
       trainSeconds: report?.train_seconds,
       sfmSeconds: report?.sfm_seconds,
       trainResolution: report?.resolution,
+      // The scale the position learning rate is tied to, and how often the
+      // guard rails fired. Both are what distinguishes a marginal run from a
+      // healthy one when the output looks plausible either way.
+      sceneExtent: report?.scene_extent,
+      suppressedGradients: report?.suppressed_gradients,
     };
     if (report?.psnr) log(`reconstruction quality: ${report.psnr.toFixed(2)} dB PSNR`);
     progress.done('train');

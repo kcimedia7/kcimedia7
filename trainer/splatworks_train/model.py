@@ -94,6 +94,57 @@ class GaussianModel:
     def colors(self) -> torch.Tensor:
         return sh_to_rgb(self.features).clamp(0.0, 1.0)
 
+    def tensors(self):
+        """Every optimised tensor, in no particular order."""
+        return [self.means, self.features, self.logit_opacity, self.log_scales, self.quats]
+
+    def sanitise_gradients(self) -> "torch.Tensor":
+        """Zero any gradient entry that is not finite, and count how many.
+
+        A single non-finite gradient is not a passing problem. Adam keeps a
+        running mean and variance per parameter, so once NaN reaches that state
+        every later step for that parameter is NaN too -- the damage is
+        permanent and silent, and it is why a run can end with a small
+        percentage of gaussians ruined rather than none or all of them.
+
+        The count comes back as a tensor so the caller can decide when to pay
+        for a device sync rather than stalling on every iteration.
+        """
+        bad = torch.zeros((), dtype=torch.long, device=self.device)
+        for t in self.tensors():
+            if t.grad is None:
+                continue
+            with torch.no_grad():
+                bad += (~torch.isfinite(t.grad)).sum()
+                torch.nan_to_num_(t.grad, nan=0.0, posinf=0.0, neginf=0.0)
+        return bad
+
+    def clamp_scales(self, extent: float) -> None:
+        """Hold gaussian sizes inside a range the rasterizer can integrate.
+
+        A gaussian whose scale collapses gives a covariance with a vanishing
+        determinant. The rasterizer floors that determinant to stay finite, but
+        the gradient still carries a 1/det**2 term, so the collapse produces
+        enormous gradients that throw the whole model apart -- the failure looks
+        like exploding positions when it started with shrinking scales.
+
+        The bounds are proportional to the scene, so this is a guard rail rather
+        than a change in behaviour: a healthy gaussian sits orders of magnitude
+        inside them.
+        """
+        lo = math.log(max(extent, 1e-6) * 1e-6)
+        hi = math.log(max(extent, 1e-6) * 0.5)
+        with torch.no_grad():
+            self.log_scales.clamp_(lo, hi)
+
+    def non_finite_count(self) -> "torch.Tensor":
+        """How many parameter entries have gone non-finite, as a tensor."""
+        bad = torch.zeros((), dtype=torch.long, device=self.device)
+        with torch.no_grad():
+            for t in self.tensors():
+                bad += (~torch.isfinite(t)).sum()
+        return bad
+
     def parameter_groups(self, position_lr):
         return [
             {"params": [self.means], "lr": position_lr, "name": "means"},

@@ -198,3 +198,86 @@ def test_mixed_image_sizes_fail_loudly_instead_of_dropping_frames(tmp_path):
     )
     with pytest.raises(RuntimeError, match="same dimensions"):
         _check_nothing_was_dropped(database, images)
+
+
+def _tiny_model(n=32, device="cpu"):
+    from splatworks_train.model import GaussianModel
+    points = np.random.default_rng(0).normal(size=(n, 3)).astype(np.float32)
+    colors = np.full((n, 3), 0.5, dtype=np.float32)
+    return GaussianModel.from_points(points, colors, device=device)
+
+
+def test_a_non_finite_gradient_cannot_poison_the_optimiser():
+    """Adam keeps running moments, so one NaN gradient ruins a parameter forever.
+
+    This is why a diverged run ends with a few percent of gaussians broken
+    rather than none or all of them: the damage is per-parameter and permanent
+    from the step it first appears.
+    """
+    import torch
+    model = _tiny_model()
+    optimizer = torch.optim.Adam(model.parameter_groups(1e-3), lr=0.0, eps=1e-15)
+
+    # A gradient the way divergence delivers it: mostly fine, a few ruined.
+    model.means.grad = torch.zeros_like(model.means)
+    model.means.grad[0, 0] = float("nan")
+    model.means.grad[1, 1] = float("inf")
+    model.means.grad[2, 2] = 0.5
+
+    bad = int(model.sanitise_gradients())
+    assert bad == 2, f"expected both bad entries counted, got {bad}"
+
+    optimizer.step()
+    assert torch.isfinite(model.means).all(), "a suppressed gradient still reached the parameters"
+
+    # And the state Adam carries forward must be clean, or the next step
+    # reintroduces the NaN with no bad gradient in sight.
+    for state in optimizer.state.values():
+        for key in ("exp_avg", "exp_avg_sq"):
+            if key in state:
+                assert torch.isfinite(state[key]).all(), f"Adam's {key} was poisoned"
+
+    # A second step with clean gradients must stay finite too.
+    model.means.grad = torch.full_like(model.means, 0.01)
+    model.sanitise_gradients()
+    optimizer.step()
+    assert torch.isfinite(model.means).all()
+
+
+def test_scales_are_held_inside_a_range_the_rasterizer_can_integrate():
+    """A collapsing scale is what starts the divergence.
+
+    The covariance determinant vanishes, the rasterizer floors it to stay
+    finite, and the gradient's 1/det**2 term then explodes. Bounding the scale
+    stops the chain at its source.
+    """
+    import torch
+    model = _tiny_model()
+    with torch.no_grad():
+        model.log_scales[0] = -80.0     # collapsed to nothing
+        model.log_scales[1] = 40.0      # swallowing the scene
+    extent = 4.0
+    model.clamp_scales(extent)
+
+    scales = model.scales()
+    assert torch.isfinite(scales).all()
+    smallest, largest = float(scales.min().detach()), float(scales.max().detach())
+    assert smallest >= extent * 1e-6 * 0.999
+    assert largest <= extent * 0.5 * 1.001
+
+    # A healthy model must pass through untouched -- this is a guard rail, not
+    # a change in behaviour.
+    healthy = _tiny_model()
+    before = healthy.log_scales.detach().clone()
+    healthy.clamp_scales(extent)
+    assert torch.equal(before, healthy.log_scales.detach())
+
+
+def test_non_finite_parameters_are_detected():
+    import torch
+    model = _tiny_model()
+    assert int(model.non_finite_count()) == 0
+    with torch.no_grad():
+        model.means[3, 1] = float("nan")
+        model.log_scales[4, 2] = float("inf")
+    assert int(model.non_finite_count()) == 2

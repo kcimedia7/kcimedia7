@@ -118,6 +118,10 @@ def train(args, log=print):
     history = []
     order = []
     train_started = time.time()
+    # Counted on the device and only read on the iterations that log, so the
+    # guard rails add no per-step synchronisation.
+    bad_grads = torch.zeros((), dtype=torch.long, device=device)
+    diverged_at = None
 
     for step in range(1, total + 1):
         for group in optimizer.param_groups:
@@ -146,7 +150,13 @@ def train(args, log=print):
             model.record_step(info["means2d"].grad, info["radius"].detach(), info["visible"],
                               viewport=(view["width"], view["height"]))
 
+        # Guard rails, in the order the failure actually propagates: a bad
+        # gradient would otherwise enter Adam's running moments and stay there,
+        # and a collapsing scale is what produces the bad gradient in the first
+        # place. Neither costs a device sync.
+        bad_grads += model.sanitise_gradients()
         optimizer.step()
+        model.clamp_scales(extent)
 
         if step % max(1, total // 20) == 0 or step == 1:
             with torch.no_grad():
@@ -156,9 +166,21 @@ def train(args, log=print):
             # A non-zero overflow means the per-tile cap is discarding gaussians
             # and the render no longer matches what the model says.
             overflow = int(info.get("overflow_tiles", 0))
+            skipped = int(bad_grads)
             history.append({"step": step, "loss": loss_value, "l1": l1_value,
                             "psnr": quality, "gaussians": model.count,
-                            "overflow_tiles": overflow})
+                            "overflow_tiles": overflow, "bad_gradients": skipped})
+
+            # Stop as soon as the model is unrecoverable rather than spending
+            # the remaining iterations producing a file that renders as nothing.
+            ruined = int(model.non_finite_count())
+            if not math.isfinite(loss_value) or ruined:
+                diverged_at = step
+                log(f"  [!] training diverged at iteration {step}: "
+                    f"{ruined} non-finite parameter(s), loss {loss_value}")
+                break
+            if skipped:
+                log(f"  [!] {skipped} non-finite gradient(s) suppressed so far")
             warn = (f"  [!] {overflow} tiles over cap "
                     f"(peak {int(info.get('max_occupancy', 0))})") if overflow else ""
             log(f"iter {step}/{total}  loss {loss_value:.4f}  l1 {l1_value:.4f}  "
@@ -176,6 +198,16 @@ def train(args, log=print):
             log("  opacity reset")
 
     train_seconds = time.time() - train_started
+
+    if diverged_at is not None:
+        raise RuntimeError(
+            f"Training diverged at iteration {diverged_at} of {total}. The model contains "
+            "non-finite values and would render as an empty scene, so no file was written. "
+            "This is what a capture with too little parallax does: moving the camera along "
+            "its own view direction -- walking straight down a road, or straight towards a "
+            "subject -- barely constrains depth, and the solve comes apart. Orbit around the "
+            "subject instead, keeping it in frame, and overlap each shot with the last."
+        )
 
     # Final quality over every training view.
     with torch.no_grad():
@@ -210,6 +242,7 @@ def train(args, log=print):
         "psnr": mean_psnr,
         "per_view_psnr": scores,
         "scene_extent": extent,
+        "suppressed_gradients": int(bad_grads),
         "sfm_seconds": round(sfm_seconds, 2),
         "train_seconds": round(train_seconds, 2),
         "resolution": [data[0]["width"], data[0]["height"]],
