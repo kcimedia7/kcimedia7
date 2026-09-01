@@ -10,6 +10,16 @@ import { api } from './api.js';
  * biggest determinant of splat quality is how the source was shot.
  */
 
+/**
+ * Ceiling on the resolution the trainer optimises at.
+ *
+ * Matches the server's clamp. The reference implementation stops at 1600; this
+ * goes further because an 8K panorama produces genuinely sharper views than
+ * that and the machine running it is the one paying, but cost is quadratic in
+ * this number and it is not a free win.
+ */
+const MAX_TRAIN_RESOLUTION = 3200;
+
 /** How many perspective views each panorama is resampled into. */
 const PANO_VIEWS = CUBE_FACES.length;
 
@@ -90,9 +100,12 @@ export function renderUpload(host, { capabilities, onCreated }) {
   function describePanoDetail() {
     const tier = PANO_TIERS.find((t) => t.width === state.settings.panoWidth) || PANO_TIERS[1];
     const face = faceSizeFor(tier.width);
+    const trainAt = Math.min(face, MAX_TRAIN_RESOLUTION);
     clear(panoDetailCost).append(
       `Each panorama becomes ${CUBE_FACES.length} views of ${face}x${face} px · `
-      + `about ${tier.seconds}s to reproject · ${tier.sourceMB} MB while decoding`);
+      + `about ${tier.seconds}s to reproject · ${tier.sourceMB} MB while decoding · `
+      + `trains at ${trainAt} px`
+      + (trainAt < face ? ` (capped from ${face})` : ''));
   }
   const nameInput = el('input', { type: 'text', placeholder: 'Name this capture' });
 
@@ -254,12 +267,13 @@ export function renderUpload(host, { capabilities, onCreated }) {
         ...(state.settings.iterations ? { iterations: state.settings.iterations } : {}),
         ...(kind === 'pano' ? {
           panoResolution: state.settings.panoWidth,
-          // Without this the trainer keeps its 320-pixel default and a 16k
-          // panorama produces exactly the same splat as a 2k one -- the whole
-          // point of the setting, thrown away at the last step. Capped because
-          // training cost is quadratic in resolution and the frames are already
-          // far sharper than the optimiser needs beyond this.
-          trainResolution: Math.min(frameSize || 1024, 1600),
+          // Train at the resolution the views actually carry. Without this the
+          // trainer keeps its 320-pixel default and a 16k panorama produces
+          // exactly the same splat as a 2k one -- the whole point of the
+          // setting, thrown away at the last step. The ceiling is the server's
+          // own; beyond it the cost, which is quadratic in resolution, stops
+          // buying detail the optimiser can use.
+          trainResolution: Math.min(frameSize || 1024, MAX_TRAIN_RESOLUTION),
         } : {}),
       }));
       frames.forEach((blob, i) => {

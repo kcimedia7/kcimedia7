@@ -382,6 +382,39 @@ can diverge. Orbiting around the subject fixes it.
 
 ---
 
+## Why a result may not look like the photographs
+
+A 3DGS scene that reads as photoreal is usually **one to three million gaussians**
+trained for 30,000 iterations from 100-300 photographs. If a conversion here
+comes back with a few thousand gaussians and long streaks across it, the model
+is not wrong so much as far too coarse: a handful of large, stretched gaussians
+is the cheapest way to reduce the loss when there are not enough of them to
+describe surfaces.
+
+What moves the needle, in order:
+
+1. **Gaussian count.** Check it in the details panel. Under about 50,000 for a
+   room-sized scene, detail is the bottleneck and nothing else matters much.
+   Density control now runs on a fixed 100-iteration interval, so more
+   iterations genuinely buy more gaussians.
+2. **How many photographs.** 26 frames is a thin capture. 100+ with generous
+   overlap is where reconstruction stops guessing.
+3. **Training resolution.** Detail the optimiser never sees cannot appear in
+   the result.
+4. **Capture geometry.** Orbits work; walking straight ahead does not.
+
+Two limits of this trainer are structural rather than settings:
+
+- **Colour is spherical harmonics degree 0**, so it has no view-dependent
+  component. Surfaces render the same from every angle, which reads as flat
+  next to a reference implementation using degree 3 — no specular response, no
+  sheen that shifts as you move.
+- **The rasterizer is pure PyTorch.** It is real and differentiable, and it is
+  far slower than the CUDA kernel the paper ships. That sets a practical
+  ceiling on how many gaussians and iterations are worth attempting.
+
+---
+
 ## Limitations worth knowing
 
 - The preview backend, used only when neither trainer is available, assumes an

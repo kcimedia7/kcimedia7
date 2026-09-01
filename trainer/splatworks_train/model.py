@@ -243,8 +243,17 @@ class GaussianModel:
         self._reset_accumulators()
 
     def densify_and_prune(self, optimizer, grad_threshold, extent, min_opacity=0.005,
-                          percent_dense=0.01, max_count=None):
-        """One round of the paper's density control: clone, split, then prune."""
+                          percent_dense=0.01, max_count=None, max_screen_size=None,
+                          max_world_fraction=0.1):
+        """One round of the paper's density control: clone, split, then prune.
+
+        `max_world_fraction` and `max_screen_size` are what keep the result
+        looking like a scene rather than a bundle of needles. A gaussian that
+        grows to a large fraction of the scene, or that covers a large part of
+        the frame, is not describing a surface any more -- it is a smear that
+        happens to reduce the loss, and it hides everything behind it. The paper
+        prunes both; without them the model stays cheap and wrong.
+        """
         grads = torch.where(self.grad_denom > 0, self.grad_accum / self.grad_denom.clamp_min(1),
                             torch.zeros_like(self.grad_accum))
         scales = self.scales().detach()
@@ -297,13 +306,37 @@ class GaussianModel:
 
         # Splitting replaces the original, so drop it along with faint gaussians.
         keep = self.opacities().detach().squeeze(-1) > min_opacity
-        keep &= self.scales().detach().max(dim=1).values < 0.5 * extent
+        # The paper's threshold is a tenth of the scene. Half, which this used
+        # to allow, lets a single gaussian span the whole reconstruction: those
+        # are the streaks that read as motion blur across an otherwise sensible
+        # scene.
+        keep &= self.scales().detach().max(dim=1).values < max_world_fraction * extent
+        if max_screen_size is not None:
+            # Screen extent catches what world extent cannot: a gaussian close
+            # to a camera can be small in the world and still cover half the
+            # frame.
+            #
+            # Cloning and splitting above have already grown the model, so the
+            # recorded radii cover only the gaussians that existed when the
+            # frames were rendered. The new ones have never been drawn, so they
+            # get a radius of zero and survive this round on their merits.
+            radii = torch.zeros(keep.shape[0], device=self.device)
+            seen = min(self.max_radius.shape[0], keep.shape[0])
+            radii[:seen] = self.max_radius[:seen]
+            keep &= radii < max_screen_size
         if split_count:
             drop_original = torch.zeros(self.count, dtype=torch.bool, device=self.device)
             drop_original[:split_mask.shape[0]] = split_mask
             keep &= ~drop_original
-        pruned = int((~keep).sum().item())
-        if pruned and int(keep.sum().item()) > 0:
+        # Refuse to empty the model: if every gaussian fails the tests, the
+        # thresholds are wrong for this scene and deleting everything turns a
+        # poor reconstruction into no reconstruction. Report what was actually
+        # removed rather than what was selected, or the log claims prunes that
+        # never happened.
+        survivors = int(keep.sum().item())
+        pruned = 0
+        if survivors and survivors < keep.shape[0]:
+            pruned = keep.shape[0] - survivors
             self.prune(optimizer, keep)
 
         self._reset_accumulators()

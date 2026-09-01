@@ -59,6 +59,25 @@ def load_views(views, image_dir, max_dim, device):
     return loaded
 
 
+
+def densification_interval(total: int, preferred: int = 100) -> int:
+    """Iterations between rounds of density control.
+
+    The paper uses a fixed 100 over a 30,000-iteration run. Deriving the
+    interval from the run length instead -- as this did -- pins the number of
+    rounds at about a dozen however long you train, so asking for 9000
+    iterations rather than 3000 bought three times the wait and the same
+    handful of gaussians. Gaussian count is the single biggest determinant of
+    whether a result looks like the photographs, so that ceiling was the
+    difference between a scene and a smear.
+
+    The floor matters at the other end: a short preview run would get only a
+    few rounds at a fixed 100, which is fewer than it used to get. Tightening
+    the interval for short runs keeps the count rising with iterations
+    everywhere.
+    """
+    return max(1, min(preferred, max(20, total // 50)))
+
 def exponential_lr(step, total, lr_init, lr_final):
     """Log-linear decay from lr_init to lr_final, as the reference does."""
     if total <= 1:
@@ -125,7 +144,7 @@ def train(args, log=print):
     total = args.iterations
     densify_from = max(50, int(0.10 * total))
     densify_until = int(0.60 * total)
-    densify_every = max(25, total // 25)
+    densify_every = densification_interval(total, args.densify_every)
     opacity_reset_every = max(300, int(0.30 * total))
 
     history = []
@@ -203,6 +222,10 @@ def train(args, log=print):
             added, pruned = model.densify_and_prune(
                 optimizer, args.densify_grad_threshold, extent,
                 min_opacity=args.min_opacity, max_count=args.max_gaussians,
+                # Screen-size pruning only once the model has had a chance to
+                # settle; early on every gaussian is still large by design.
+                max_screen_size=(args.max_screen_size
+                                 if step > opacity_reset_every else None),
             )
             log(f"  densify: +{added} -{pruned} -> {model.count} gaussians")
 
@@ -284,6 +307,10 @@ def build_parser():
     p.add_argument("--max-per-tile", type=int, default=4096,
                    help="gaussians composited per tile; below real occupancy this truncates")
     p.add_argument("--densify-grad-threshold", type=float, default=0.0002)
+    p.add_argument("--densify-every", type=int, default=100,
+                   help="iterations between densification rounds (the paper uses 100)")
+    p.add_argument("--max-screen-size", type=float, default=20.0,
+                   help="prune gaussians whose screen radius exceeds this many pixels")
     p.add_argument("--min-opacity", type=float, default=0.005)
     p.add_argument("--lambda-dssim", type=float, default=0.2)
     p.add_argument("--background", type=float, default=0.0)

@@ -6,6 +6,7 @@ from one that merely produces output.
 """
 
 import json
+import math
 import shutil
 import sys
 from pathlib import Path
@@ -281,3 +282,77 @@ def test_non_finite_parameters_are_detected():
         model.means[3, 1] = float("nan")
         model.log_scales[4, 2] = float("inf")
     assert int(model.non_finite_count()) == 2
+
+
+def test_more_iterations_buy_more_densification():
+    """Gaussian count is what decides whether a result looks like the photos.
+
+    The interval used to be a fraction of the run, which pinned the number of
+    density-control rounds at about a dozen however long you trained: asking
+    for 9000 iterations rather than 3000 bought three times the wait and the
+    same handful of gaussians.
+    """
+    from splatworks_train.train import densification_interval
+
+    def rounds(total):
+        span = int(0.60 * total) - max(50, int(0.10 * total))
+        return span // densification_interval(total)
+
+    counts = [rounds(t) for t in (1000, 3000, 9000, 30000)]
+    assert counts == sorted(counts), f"rounds must rise with iterations, got {counts}"
+    assert counts[-1] > counts[0] * 4, f"a 30x longer run should densify far more: {counts}"
+
+    # The paper's interval over a paper-length run.
+    assert densification_interval(30_000) == 100
+
+    # And a short run must not come out worse than the schedule it replaced.
+    for total in (500, 1000, 3000):
+        old_interval = max(25, total // 25)
+        assert densification_interval(total) <= old_interval, (
+            f"{total} iterations would densify less often than before")
+
+
+def test_oversized_gaussians_are_pruned():
+    """Streaks across a scene are single gaussians grown far too large.
+
+    They reduce the loss cheaply while describing no surface and hiding
+    everything behind them, so the paper prunes by both world and screen
+    extent. Allowing half the scene, as this once did, is what let them
+    survive.
+    """
+    import torch
+    from splatworks_train.model import GaussianModel
+    # A dense cloud in a small volume, so ordinary gaussians sit well inside
+    # the threshold and only the deliberately oversized ones fail it. Spreading
+    # a handful of points across the whole extent instead would make every
+    # gaussian oversized, and the model refuses to prune itself to nothing.
+    points = np.random.default_rng(0).normal(size=(400, 3)).astype(np.float32) * 0.05
+    model = GaussianModel.from_points(points, np.full((400, 3), 0.5, dtype=np.float32))
+    optimizer = torch.optim.Adam(model.parameter_groups(1e-3), lr=0.0, eps=1e-15)
+    extent = 4.0
+
+    with torch.no_grad():
+        # One gaussian a quarter of the scene across: under the old half-scene
+        # threshold this survived.
+        model.log_scales[0] = math.log(extent * 0.25)
+        # And one that is small in the world but huge on screen.
+        model.max_radius[1] = 500.0
+
+    before = model.count
+    _, pruned = model.densify_and_prune(optimizer, grad_threshold=1e9, extent=extent,
+                                        max_screen_size=20.0)
+    assert model.count == before - 2, f"expected both oversized gaussians pruned, count {model.count}"
+    assert pruned == 2, f"the count reported must be what was removed, got {pruned}"
+
+    scales = model.scales().detach()
+    assert float(scales.max()) < 0.1 * extent, "a world-oversized gaussian survived"
+
+    # And a model where everything fails the test is left alone rather than
+    # emptied: that turns a poor reconstruction into no reconstruction.
+    doomed = GaussianModel.from_points(
+        np.random.default_rng(1).normal(size=(32, 3)).astype(np.float32),
+        np.full((32, 3), 0.5, dtype=np.float32))
+    opt2 = torch.optim.Adam(doomed.parameter_groups(1e-3), lr=0.0, eps=1e-15)
+    _, none_pruned = doomed.densify_and_prune(opt2, grad_threshold=1e9, extent=0.001)
+    assert doomed.count == 32, "the model pruned itself to nothing"
+    assert none_pruned == 0, "reported a prune that did not happen"
