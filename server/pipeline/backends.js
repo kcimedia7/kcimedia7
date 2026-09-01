@@ -2,6 +2,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { commandExists, run } from './run.js';
 import { BACKEND, ROOT } from '../config.js';
+import { resolveDevice } from '../config.js';
 
 /**
  * Which reconstruction path this machine can actually run, best first:
@@ -112,11 +113,24 @@ async function probeCapabilities() {
   return cached;
 }
 
-function explain({ colmap, trainer, gpu, ffmpeg, python, backend }) {
+export function explain({ colmap, trainer, gpu, ffmpeg, python, backend, env = process.env }) {
   const out = [];
   if (backend === 'gaussian') {
-    out.push('Using the bundled trainer: pycolmap solves camera poses and gaussians are optimised on the CPU.');
-    if (!gpu) out.push('No NVIDIA GPU was detected, so training runs on the CPU and is slow but real.');
+    // Naming the device here rather than assuming the CPU: this line is the
+    // first thing printed at startup, and claiming CPU while the trainer is
+    // configured for CUDA is worse than saying nothing -- it is the message
+    // someone checks when a conversion turns out to be twenty times slower
+    // than expected.
+    const device = resolveDevice(null, env);
+    const where = device === 'cpu' ? 'the CPU' : (gpu?.name || `the GPU (${device})`);
+    out.push('Using the bundled trainer: pycolmap solves camera poses and gaussians '
+      + `are optimised on ${where}.`);
+    if (!gpu) {
+      out.push('No NVIDIA GPU was detected, so training runs on the CPU and is slow but real.');
+    } else if (device === 'cpu') {
+      out.push(`${gpu.name || 'An NVIDIA GPU'} was detected but training is set to the CPU. `
+        + 'Set SPLAT_TRAIN_DEVICE=cuda in the environment this server runs in to use it.');
+    }
   }
   if (backend === 'preview') {
     if (!python.available) out.push(`The bundled trainer is unavailable: ${python.reason}.`);

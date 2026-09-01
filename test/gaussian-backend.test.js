@@ -91,3 +91,35 @@ test('an unusable training device is rejected before Python is launched', () => 
       `${bad} should not reach the trainer`);
   }
 });
+
+test('startup names the device training will actually use', async () => {
+  // This line is the first thing printed when the server boots, and it is what
+  // someone checks after a conversion turns out to be twenty times slower than
+  // expected. Claiming the CPU while the trainer is set to CUDA is worse than
+  // saying nothing at all.
+  const { explain } = await import('../server/pipeline/backends.js');
+  const gpu = { name: 'NVIDIA GeForce RTX 5090 Laptop GPU' };
+
+  const onCuda = explain({ backend: 'gaussian', gpu, python: {}, colmap: null, trainer: null,
+    ffmpeg: null, env: { SPLAT_TRAIN_DEVICE: 'cuda' } }).join(' ');
+  assert.match(onCuda, /optimised on NVIDIA GeForce RTX 5090 Laptop GPU/);
+  assert.doesNotMatch(onCuda, /optimised on the CPU/);
+
+  // A GPU present but unused must say so, and say what to do about it.
+  const onCpu = explain({ backend: 'gaussian', gpu, python: {}, colmap: null, trainer: null,
+    ffmpeg: null, env: {} }).join(' ');
+  assert.match(onCpu, /optimised on the CPU/);
+  assert.match(onCpu, /SPLAT_TRAIN_DEVICE=cuda/);
+  assert.match(onCpu, /RTX 5090/);
+
+  // With no GPU at all there is nothing to suggest.
+  // A device with no detected card still has to name where it runs.
+  const unnamed = explain({ backend: 'gaussian', gpu: null, python: {}, colmap: null,
+    trainer: null, ffmpeg: null, env: { SPLAT_TRAIN_DEVICE: 'cuda:1' } }).join(' ');
+  assert.match(unnamed, /optimised on the GPU \(cuda:1\)/);
+
+  const noGpu = explain({ backend: 'gaussian', gpu: null, python: {}, colmap: null,
+    trainer: null, ffmpeg: null, env: {} }).join(' ');
+  assert.match(noGpu, /No NVIDIA GPU was detected/);
+  assert.doesNotMatch(noGpu, /SPLAT_TRAIN_DEVICE=cuda/);
+});

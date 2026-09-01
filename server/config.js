@@ -32,3 +32,20 @@ export const PREVIEW_GRID = Number(process.env.SPLAT_PREVIEW_GRID || 160);
 
 /** Force a specific pipeline backend: 'auto' | 'colmap' | 'preview'. */
 export const BACKEND = process.env.SPLAT_BACKEND || 'auto';
+
+/**
+ * Pick the torch device the trainer runs on.
+ *
+ * The trainer is plain PyTorch, so it runs on a CUDA device with no extra build
+ * step -- but only if PyTorch itself was installed with CUDA support. Defaults
+ * to CPU because that always works; opt in once `doctor` says the card can
+ * train and torch.cuda.is_available() is true. Rejecting an unknown value here
+ * beats handing it to Python, which would fail minutes into a conversion.
+ */
+export function resolveDevice(requested, env = process.env) {
+  const device = String(requested || env.SPLAT_TRAIN_DEVICE || 'cpu').trim().toLowerCase();
+  if (!/^(cpu|cuda(:\d+)?)$/.test(device)) {
+    throw new Error(`device must be 'cpu', 'cuda' or 'cuda:N', got '${device}'`);
+  }
+  return device;
+}

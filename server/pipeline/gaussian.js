@@ -2,6 +2,9 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { run } from './run.js';
 import { PYTHON_CMD, TRAINER_DIR } from './backends.js';
+import { resolveDevice } from '../config.js';
+
+export { resolveDevice };
 
 /**
  * Real 3D Gaussian Splatting, run by the Python trainer in `trainer/`.
@@ -15,23 +18,6 @@ import { PYTHON_CMD, TRAINER_DIR } from './backends.js';
 
 /** Fractions of the training stage, used to turn trainer output into progress. */
 const PHASE_WEIGHTS = { sfm: 0.25, train: 0.7, write: 0.05 };
-
-/**
- * Pick the torch device the trainer runs on.
- *
- * The trainer is plain PyTorch, so it runs on a CUDA device with no extra build
- * step -- but only if PyTorch itself was installed with CUDA support. Defaults
- * to CPU because that always works; opt in once `doctor` says the card can
- * train and torch.cuda.is_available() is true. Rejecting an unknown value here
- * beats handing it to Python, which would fail minutes into a conversion.
- */
-export function resolveDevice(requested, env = process.env) {
-  const device = String(requested || env.SPLAT_TRAIN_DEVICE || 'cpu').trim().toLowerCase();
-  if (!/^(cpu|cuda(:\d+)?)$/.test(device)) {
-    throw new Error(`device must be 'cpu', 'cuda' or 'cuda:N', got '${device}'`);
-  }
-  return device;
-}
 
 export async function runGaussianTraining({
   imagesDir, workDir, outputDir, settings = {}, log, onProgress, signal,
