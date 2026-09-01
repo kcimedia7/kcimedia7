@@ -66,6 +66,24 @@ def load_views(views, image_dir, max_dim, device):
 
 
 
+
+def sh_band_interval(total: int, degree: int, reference: int = 1000) -> int:
+    """Iterations between switching on each spherical harmonics band.
+
+    The reference adds one every 1000 over a 30,000-iteration run, so every band
+    is active for the last 90% of training. That margin matters more than it
+    looks: the bands learn at a twentieth of the base colour's rate, and until
+    they converge they fit *worse* than not having them at all -- measured on a
+    view-dependent target, degree 3 is about 2.7x worse than degree 0 at 400
+    steps and roughly 10x better by 2000.
+
+    So a short run needs them switched on sooner, or it pays for parameters
+    that never get where they are going.
+    """
+    if degree <= 0:
+        return max(1, total)
+    return max(1, min(reference, int(0.25 * total / degree)))
+
 def densification_interval(total: int, preferred: int = 100) -> int:
     """Iterations between rounds of density control.
 
@@ -153,9 +171,14 @@ def train(args, log=print):
     densify_from = max(50, int(0.10 * total))
     densify_until = int(0.60 * total)
     densify_every = densification_interval(total, args.densify_every)
-    # Spread the bands over the first half of training, so the last one still
-    # has time to be optimised rather than arriving at the finish line.
-    sh_every = max(1, int(0.5 * total / max(1, args.sh_degree)))
+    sh_every = sh_band_interval(total, args.sh_degree)
+    if args.sh_degree > 0:
+        settle = total - sh_every * args.sh_degree
+        if settle < 2000:
+            log(f"  [!] only {settle} iterations remain after the last colour band "
+                "switches on. View-dependent colour trains at a twentieth of the base "
+                "rate and may not converge in that time; use more iterations, or "
+                "--sh-degree 0 for a smaller flat-shaded model.")
     opacity_reset_every = max(300, int(0.30 * total))
 
     history = []

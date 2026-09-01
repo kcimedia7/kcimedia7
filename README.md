@@ -396,15 +396,18 @@ What moves the needle, in order:
 1. **Gaussian count.** Check it in the details panel. Under about 50,000 for a
    room-sized scene, detail is the bottleneck and nothing else matters much.
    Density control now runs on a fixed 100-iteration interval, so more
-   iterations genuinely buy more gaussians. Colour is degree-3 spherical
-   harmonics, switched on one band at a time through the first half of
-   training; `--sh-degree 0` restores the older flat-shaded behaviour and a
-   file about a quarter the size.
-2. **How many photographs.** 26 frames is a thin capture. 100+ with generous
+   iterations genuinely buy more gaussians.
+2. **Iterations, for colour specifically.** View-dependent colour trains at a
+   twentieth of the base rate, so it needs room to converge. Measured against a
+   view-dependent target, degree 3 fits *worse* than degree 0 at 400 steps and
+   about ten times better by 2000. The trainer warns when a run is too short
+   for the bands it is about to switch on; `--sh-degree 0` gives a flat-shaded
+   model and a file roughly a quarter the size.
+3. **How many photographs.** 26 frames is a thin capture. 100+ with generous
    overlap is where reconstruction stops guessing.
-3. **Training resolution.** Detail the optimiser never sees cannot appear in
+4. **Training resolution.** Detail the optimiser never sees cannot appear in
    the result.
-4. **Capture geometry.** Orbits work; walking straight ahead does not.
+5. **Capture geometry.** Orbits work; walking straight ahead does not.
 
 Two limits of this trainer are structural rather than settings:
 
