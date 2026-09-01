@@ -11,6 +11,8 @@ import math
 import numpy as np
 import torch
 
+from .sh import MAX_DEGREE, coefficient_count, eval_sh
+
 SH_C0 = 0.28209479177387814
 
 
@@ -45,20 +47,30 @@ def mean_nn_distance(points: np.ndarray, k: int = 3) -> np.ndarray:
 
 
 class GaussianModel:
-    def __init__(self, means, scales, quats, opacity, features, device="cpu"):
+    def __init__(self, means, scales, quats, opacity, features_dc, features_rest,
+                 device="cpu", sh_degree=MAX_DEGREE):
         self.device = device
         self.means = means.to(device).requires_grad_(True)
         self.log_scales = scales.to(device).requires_grad_(True)
         self.quats = quats.to(device).requires_grad_(True)
         self.logit_opacity = opacity.to(device).requires_grad_(True)
-        self.features = features.to(device).requires_grad_(True)   # SH degree 0
+        # Colour is split the way the reference splits it: the constant term
+        # and the view-dependent bands are separate parameters because they
+        # want very different learning rates. The higher bands are a correction
+        # to a colour that is already roughly right, and letting them move as
+        # fast as the base colour makes training unstable.
+        self.features_dc = features_dc.to(device).requires_grad_(True)      # (N, 1, 3)
+        self.features_rest = features_rest.to(device).requires_grad_(True)  # (N, 15, 3)
+        self.sh_degree = sh_degree
+        # Bands are switched on one at a time during training, not all at once.
+        self.active_sh_degree = 0
         self._reset_accumulators()
 
     # ---------------------------------------------------------------- factory
 
     @classmethod
     def from_points(cls, points: np.ndarray, colors: np.ndarray, device="cpu",
-                    initial_opacity=0.1, max_points=None):
+                    initial_opacity=0.1, max_points=None, sh_degree=MAX_DEGREE):
         """Initialise from an SfM sparse cloud, exactly as the paper does."""
         if max_points and points.shape[0] > max_points:
             keep = np.random.default_rng(0).choice(points.shape[0], max_points, replace=False)
@@ -69,14 +81,20 @@ class GaussianModel:
         quats = np.zeros((n, 4), dtype=np.float32)
         quats[:, 0] = 1.0
 
+        # The sparse cloud gives one colour per point, which is exactly the
+        # constant term. The view-dependent bands start at zero: the model
+        # begins as the flat-shaded scene it used to be and earns the rest.
+        rest_count = coefficient_count(sh_degree) - 1
         return cls(
             means=torch.tensor(points, dtype=torch.float32),
             # An isotropic gaussian roughly filling the gap to its neighbours.
             scales=torch.tensor(np.log(dist)[:, None].repeat(3, axis=1), dtype=torch.float32),
             quats=torch.tensor(quats),
             opacity=torch.full((n, 1), inverse_sigmoid(initial_opacity), dtype=torch.float32),
-            features=rgb_to_sh(torch.tensor(colors, dtype=torch.float32)),
+            features_dc=rgb_to_sh(torch.tensor(colors, dtype=torch.float32)).unsqueeze(1),
+            features_rest=torch.zeros((n, rest_count, 3), dtype=torch.float32),
             device=device,
+            sh_degree=sh_degree,
         )
 
     # ------------------------------------------------------------ activations
@@ -91,12 +109,35 @@ class GaussianModel:
     def opacities(self) -> torch.Tensor:
         return torch.sigmoid(self.logit_opacity)
 
-    def colors(self) -> torch.Tensor:
-        return sh_to_rgb(self.features).clamp(0.0, 1.0)
+    def features(self) -> torch.Tensor:
+        """All coefficients as one (N, C, 3) tensor, constant term first."""
+        return torch.cat([self.features_dc, self.features_rest], dim=1)
+
+    def colors(self, dirs: torch.Tensor | None = None) -> torch.Tensor:
+        """Colour per gaussian, view-dependent when a direction is supplied.
+
+        Without directions this returns the constant term alone -- the diffuse
+        appearance, which is what a viewer that ignores the higher bands shows
+        and what the exported `.splat` carries.
+        """
+        if dirs is None or self.active_sh_degree == 0:
+            return sh_to_rgb(self.features_dc[:, 0]).clamp(0.0, 1.0)
+        value = eval_sh(self.active_sh_degree, self.features(), dirs)
+        # The 0.5 shift is part of the encoding, not a tone curve: an
+        # all-zero model is mid grey rather than black.
+        return (value + 0.5).clamp(0.0, 1.0)
+
+    def raise_sh_degree(self) -> bool:
+        """Switch on the next band, if there is one left."""
+        if self.active_sh_degree >= self.sh_degree:
+            return False
+        self.active_sh_degree += 1
+        return True
 
     def tensors(self):
         """Every optimised tensor, in no particular order."""
-        return [self.means, self.features, self.logit_opacity, self.log_scales, self.quats]
+        return [self.means, self.features_dc, self.features_rest,
+                self.logit_opacity, self.log_scales, self.quats]
 
     def sanitise_gradients(self) -> "torch.Tensor":
         """Zero any gradient entry that is not finite, and count how many.
@@ -148,7 +189,11 @@ class GaussianModel:
     def parameter_groups(self, position_lr):
         return [
             {"params": [self.means], "lr": position_lr, "name": "means"},
-            {"params": [self.features], "lr": 2.5e-3, "name": "features"},
+            {"params": [self.features_dc], "lr": 2.5e-3, "name": "features_dc"},
+            # A twentieth of the base colour's rate, as the reference uses. The
+            # higher bands correct a colour that is already close, so letting
+            # them move at full speed trades stability for nothing.
+            {"params": [self.features_rest], "lr": 2.5e-3 / 20.0, "name": "features_rest"},
             {"params": [self.logit_opacity], "lr": 0.05, "name": "opacity"},
             {"params": [self.log_scales], "lr": 5e-3, "name": "scales"},
             {"params": [self.quats], "lr": 1e-3, "name": "quats"},
@@ -186,10 +231,12 @@ class GaussianModel:
     # ------------------------------------------------------------- mutations
 
     def _tensors(self):
-        return ["means", "features", "logit_opacity", "log_scales", "quats"]
+        return ["means", "features_dc", "features_rest", "logit_opacity",
+                "log_scales", "quats"]
 
     ATTR_FOR_GROUP = {
-        "means": "means", "features": "features", "opacity": "logit_opacity",
+        "means": "means", "features_dc": "features_dc",
+        "features_rest": "features_rest", "opacity": "logit_opacity",
         "scales": "log_scales", "quats": "quats",
     }
 
@@ -217,7 +264,8 @@ class GaussianModel:
     def _current_values(self):
         return {
             "means": self.means.detach(),
-            "features": self.features.detach(),
+            "features_dc": self.features_dc.detach(),
+            "features_rest": self.features_rest.detach(),
             "opacity": self.logit_opacity.detach(),
             "scales": self.log_scales.detach(),
             "quats": self.quats.detach(),
@@ -273,11 +321,13 @@ class GaussianModel:
             clone_mask &= allowed
             split_mask &= allowed
 
-        extra = {k: [] for k in ["means", "features", "opacity", "scales", "quats"]}
+        extra = {k: [] for k in ["means", "features_dc", "features_rest", "opacity",
+                                 "scales", "quats"]}
 
         if clone_mask.any():
             extra["means"].append(self.means.detach()[clone_mask])
-            extra["features"].append(self.features.detach()[clone_mask])
+            extra["features_dc"].append(self.features_dc.detach()[clone_mask])
+            extra["features_rest"].append(self.features_rest.detach()[clone_mask])
             extra["opacity"].append(self.logit_opacity.detach()[clone_mask])
             extra["scales"].append(self.log_scales.detach()[clone_mask])
             extra["quats"].append(self.quats.detach()[clone_mask])
@@ -293,7 +343,8 @@ class GaussianModel:
             centre = self.means.detach()[split_mask]
             for sign in (1.0, -1.0):
                 extra["means"].append(centre + sign * offset * 0.5)
-                extra["features"].append(self.features.detach()[split_mask])
+                extra["features_dc"].append(self.features_dc.detach()[split_mask])
+                extra["features_rest"].append(self.features_rest.detach()[split_mask])
                 extra["opacity"].append(self.logit_opacity.detach()[split_mask])
                 extra["scales"].append(torch.log(src_scales / 1.6))
                 extra["quats"].append(self.quats.detach()[split_mask])

@@ -27,6 +27,7 @@ from .model import GaussianModel
 from .ply_io import write_ply
 from .rasterizer import build_covariance, rasterize
 from .sfm import run_sfm, scene_extent
+from .sh import MAX_DEGREE, camera_centre, view_directions
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
 
@@ -52,6 +53,11 @@ def load_views(views, image_dir, max_dim, device):
             "name": view.name,
             "image": torch.tensor(np.asarray(img, dtype=np.float32) / 255.0, device=device),
             "viewmat": torch.tensor(view.world_to_cam, dtype=torch.float32, device=device),
+            # Where the camera sits in world space, which is what the
+            # view-dependent colour bands are evaluated against. Computed once
+            # here rather than per iteration.
+            "camera_centre": camera_centre(
+                torch.tensor(view.world_to_cam, dtype=torch.float32, device=device)),
             "K": (view.fx * sx, view.fy * sy, view.cx * sx, view.cy * sy),
             "width": width,
             "height": height,
@@ -127,7 +133,9 @@ def train(args, log=print):
     data = load_views(views, image_dir, args.resolution, device)
     log(f"training at {data[0]['width']}x{data[0]['height']}")
 
-    model = GaussianModel.from_points(points, colors, device=device, max_points=args.max_init)
+    model = GaussianModel.from_points(points, colors, device=device,
+                                      max_points=args.max_init,
+                                      sh_degree=args.sh_degree)
     log(f"initialised {model.count} gaussians from the sparse cloud")
 
     position_lr_init = 0.00016 * extent
@@ -145,6 +153,9 @@ def train(args, log=print):
     densify_from = max(50, int(0.10 * total))
     densify_until = int(0.60 * total)
     densify_every = densification_interval(total, args.densify_every)
+    # Spread the bands over the first half of training, so the last one still
+    # has time to be optimised rather than arriving at the finish line.
+    sh_every = max(1, int(0.5 * total / max(1, args.sh_degree)))
     opacity_reset_every = max(300, int(0.30 * total))
 
     history = []
@@ -166,8 +177,11 @@ def train(args, log=print):
         view = data[order.pop()]
 
         cov3d = build_covariance(model.scales(), model.quats)
+        # Colour is now a function of the direction each gaussian is seen from,
+        # so it has to be evaluated per view rather than read off the model.
+        dirs = view_directions(model.means, view["camera_centre"])
         image, info = rasterize(
-            model.means, cov3d, model.colors(), model.opacities(),
+            model.means, cov3d, model.colors(dirs), model.opacities(),
             view["viewmat"], view["K"], view["width"], view["height"],
             background=background, max_per_tile=args.max_per_tile,
         )
@@ -229,6 +243,13 @@ def train(args, log=print):
             )
             log(f"  densify: +{added} -{pruned} -> {model.count} gaussians")
 
+        # One new band every so often, never all at once. Starting with every
+        # band active lets the higher ones absorb error that belongs to
+        # geometry, and the model bakes viewpoint-specific artefacts into
+        # colour it can never undo.
+        if step % sh_every == 0 and model.raise_sh_degree():
+            log(f"  spherical harmonics: degree {model.active_sh_degree}")
+
         if args.opacity_reset and step % opacity_reset_every == 0 and step < densify_until:
             model.reset_opacity(optimizer)
             log("  opacity reset")
@@ -250,8 +271,9 @@ def train(args, log=print):
         scores = []
         for view in data:
             cov3d = build_covariance(model.scales(), model.quats)
+            dirs = view_directions(model.means, view["camera_centre"])
             image, _ = rasterize(
-                model.means, cov3d, model.colors(), model.opacities(),
+                model.means, cov3d, model.colors(dirs), model.opacities(),
                 view["viewmat"], view["K"], view["width"], view["height"],
                 background=background, max_per_tile=args.max_per_tile,
             )
@@ -263,7 +285,8 @@ def train(args, log=print):
     size = write_ply(
         ply_path,
         model.means.detach().cpu().numpy(),
-        model.features.detach().cpu().numpy(),
+        model.features_dc.detach().cpu().numpy(),
+        model.features_rest.detach().cpu().numpy(),
         model.logit_opacity.detach().cpu().numpy(),
         model.log_scales.detach().cpu().numpy(),
         model.quats.detach().cpu().numpy(),
@@ -280,6 +303,7 @@ def train(args, log=print):
         "scene_extent": extent,
         "suppressed_gradients": int(bad_grads),
         "device": str(device),
+        "sh_degree": model.active_sh_degree,
         "sfm_seconds": round(sfm_seconds, 2),
         "train_seconds": round(train_seconds, 2),
         "resolution": [data[0]["width"], data[0]["height"]],
@@ -306,6 +330,8 @@ def build_parser():
                    help="cap on sparse points used to seed the model")
     p.add_argument("--max-per-tile", type=int, default=4096,
                    help="gaussians composited per tile; below real occupancy this truncates")
+    p.add_argument("--sh-degree", type=int, default=MAX_DEGREE,
+                   help="spherical harmonics bands for view-dependent colour (0..3)")
     p.add_argument("--densify-grad-threshold", type=float, default=0.0002)
     p.add_argument("--densify-every", type=int, default=100,
                    help="iterations between densification rounds (the paper uses 100)")

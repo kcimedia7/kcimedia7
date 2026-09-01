@@ -396,7 +396,10 @@ What moves the needle, in order:
 1. **Gaussian count.** Check it in the details panel. Under about 50,000 for a
    room-sized scene, detail is the bottleneck and nothing else matters much.
    Density control now runs on a fixed 100-iteration interval, so more
-   iterations genuinely buy more gaussians.
+   iterations genuinely buy more gaussians. Colour is degree-3 spherical
+   harmonics, switched on one band at a time through the first half of
+   training; `--sh-degree 0` restores the older flat-shaded behaviour and a
+   file about a quarter the size.
 2. **How many photographs.** 26 frames is a thin capture. 100+ with generous
    overlap is where reconstruction stops guessing.
 3. **Training resolution.** Detail the optimiser never sees cannot appear in
@@ -405,10 +408,12 @@ What moves the needle, in order:
 
 Two limits of this trainer are structural rather than settings:
 
-- **Colour is spherical harmonics degree 0**, so it has no view-dependent
-  component. Surfaces render the same from every angle, which reads as flat
-  next to a reference implementation using degree 3 — no specular response, no
-  sheen that shifts as you move.
+- **The built-in viewer shows the diffuse term only.** Colour is now spherical
+  harmonics degree 3, so the model carries the view-dependent bands and any
+  3DGS viewer that reads them — SuperSplat, the UE5 plugins — renders the sheen
+  and specular response. The `.splat` format this app streams is 32 bytes per
+  gaussian with a single RGBA colour and has nowhere to put them, so the
+  preview here stays flat while an export does not.
 - **The rasterizer is pure PyTorch.** It is real and differentiable, and it is
   far slower than the CUDA kernel the paper ships. That sets a practical
   ceiling on how many gaussians and iterations are worth attempting.
