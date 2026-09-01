@@ -71,13 +71,22 @@ async function uploadCapture({ name = 'Test capture', frames = 6, settings = {},
 
 async function waitForStatus(id, wanted, timeoutMs = 45_000) {
   const deadline = Date.now() + timeoutMs;
+  let last = null;
   while (Date.now() < deadline) {
     const res = await fetch(`${base}/api/assets/${id}`);
     const { asset } = await res.json();
+    last = asset;
     if (wanted.includes(asset.status)) return asset;
     await new Promise((r) => setTimeout(r, 150));
   }
-  throw new Error(`asset ${id} never reached ${wanted.join('/')}`);
+  // Say what it was doing instead. Test files run in parallel, so a real
+  // conversion can be waiting behind another one for a worker rather than
+  // being stuck -- and "never reached ready" alone cannot tell those apart.
+  const queue = await fetch(`${base}/api/health`).then((r) => r.json())
+    .then((h) => JSON.stringify(h.queue)).catch(() => 'unavailable');
+  throw new Error(`asset ${id} never reached ${wanted.join('/')} in ${timeoutMs}ms. `
+    + `last status: ${last?.status} (${last?.stage}) "${last?.message}" `
+    + `error: ${last?.error ?? 'none'}. queue: ${queue}`);
 }
 
 test('health answers immediately, before backend detection finishes', async () => {
@@ -315,8 +324,7 @@ test('a 360 capture is stored and reported as its own kind', async () => {
   const asset = await uploadCapture({ name: '360 room', kind: 'pano', frames: 6 });
   assert.equal(asset.kind, 'pano');
 
-  const res = await fetch(`${base}/api/assets/${asset.id}`);
-  const { asset: fetched } = await res.json();
+  const fetched = await waitForStatus(asset.id, ['ready', 'failed']);
   assert.equal(fetched.kind, 'pano', 'the kind must survive a round trip through the store');
 });
 
@@ -325,4 +333,5 @@ test('an unknown capture kind falls back to photos rather than being stored', as
   // must not end up rendered there.
   const asset = await uploadCapture({ name: 'odd', kind: 'not-a-kind', frames: 4 });
   assert.equal(asset.kind, 'photos');
+  await waitForStatus(asset.id, ['ready', 'failed']);
 });

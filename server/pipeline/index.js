@@ -99,6 +99,7 @@ export async function convert(ctx) {
       // healthy one when the output looks plausible either way.
       sceneExtent: report?.scene_extent,
       suppressedGradients: report?.suppressed_gradients,
+      device: report?.device,
     };
     if (report?.psnr) log(`reconstruction quality: ${report.psnr.toFixed(2)} dB PSNR`);
     progress.done('train');

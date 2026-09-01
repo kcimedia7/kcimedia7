@@ -31,8 +31,17 @@ export const api = {
     method: 'POST',
     body: JSON.stringify({ settings }),
   }),
-  splatUrl: (id) => `/api/assets/${encodeURIComponent(id)}/splat`,
-  thumbnailUrl: (id) => `/api/assets/${encodeURIComponent(id)}/thumbnail`,
+  /**
+   * Asset files are cached hard -- a splat is megabytes and never changes for a
+   * given conversion. But a re-run replaces the file behind the same id, and
+   * `immutable` tells the browser not to revalidate even on reload, so without
+   * a version in the URL the viewer would keep showing the previous model
+   * indefinitely while the details panel showed the new one.
+   */
+  splatUrl: (id, version) =>
+    `/api/assets/${encodeURIComponent(id)}/splat${versionQuery(version)}`,
+  thumbnailUrl: (id, version) =>
+    `/api/assets/${encodeURIComponent(id)}/thumbnail${versionQuery(version)}`,
   exportUrl: (id, format, raw) =>
     `/api/assets/${encodeURIComponent(id)}/export.${format}${raw ? '?raw=1' : ''}`,
 
@@ -90,4 +99,22 @@ export function subscribe(onUpdate) {
     clearTimeout(retry);
     source?.close();
   };
+}
+
+/** Cache-busting token for an asset's files: whenever its conversion finished. */
+function versionQuery(version) {
+  if (!version) return '';
+  return `?v=${encodeURIComponent(String(version))}`;
+}
+
+/**
+ * A token that changes whenever a conversion produced a new model.
+ *
+ * `finishedAt` moves on every run; the splat count is a second signal in case
+ * two runs somehow land on the same timestamp.
+ */
+export function assetVersion(asset) {
+  if (!asset) return '';
+  return [asset.finishedAt || asset.updatedAt || '', asset.result?.splatCount ?? '']
+    .filter(Boolean).join('-');
 }

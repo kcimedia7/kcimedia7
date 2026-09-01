@@ -1,5 +1,5 @@
 import { el, clear, relativeTime, formatCount } from './ui.js';
-import { api } from './api.js';
+import { api, assetVersion } from './api.js';
 
 /** How each capture kind is described in the library and detail views. */
 const SOURCE_LABEL = { photos: 'Photos', video: 'Video', pano: '360 panorama' };
@@ -107,7 +107,7 @@ function matchesQuery(asset, query) {
 function tile(asset, onOpen) {
   const thumb = el('div', { class: 'tile-thumb' });
   if (asset.result?.thumbnail) {
-    thumb.style.backgroundImage = `url(${api.thumbnailUrl(asset.id)})`;
+    thumb.style.backgroundImage = `url(${api.thumbnailUrl(asset.id, assetVersion(asset))})`;
   } else if (asset.status === 'running' || asset.status === 'queued') {
     thumb.append(el('div', { style: { display: 'grid', gap: '8px', justifyItems: 'center' } },
       el('span', { class: 'spinner' }),

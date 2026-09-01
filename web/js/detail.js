@@ -2,7 +2,7 @@ import {
   el, clear, toast, slider, debounce, formatBytes, formatCount, relativeTime,
   formatDuration, confirmAction,
 } from './ui.js';
-import { api } from './api.js';
+import { api, assetVersion } from './api.js';
 import { SplatViewer } from './viewer/renderer.js';
 
 /** How each capture kind is described in the library and detail views. */
@@ -93,7 +93,9 @@ export function renderDetail(host, { asset, onDeleted, onChanged }) {
     }
 
     try {
-      const res = await fetch(api.splatUrl(current.id));
+      // The version makes a re-run fetch the new model rather than the
+      // hard-cached previous one.
+      const res = await fetch(api.splatUrl(current.id, assetVersion(current)));
       if (!res.ok) throw new Error(`Could not load the splat (${res.status})`);
       const buffer = await res.arrayBuffer();
       if (disposed) return;

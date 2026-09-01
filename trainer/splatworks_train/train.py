@@ -69,6 +69,19 @@ def exponential_lr(step, total, lr_init, lr_final):
 
 def train(args, log=print):
     device = torch.device(args.device)
+    # Say what this is training on, every time. A run that quietly fell back to
+    # the CPU looks identical to one that could not use the GPU in the first
+    # place -- the only visible difference is that it takes twenty times longer,
+    # which is exactly the sort of thing that goes unnoticed until someone asks
+    # why a conversion took half an hour.
+    if device.type == "cuda":
+        log(f"training on {torch.cuda.get_device_name(device)} ({device})")
+    else:
+        available = torch.cuda.is_available()
+        log(f"training on the CPU"
+            + ("  [!] a CUDA GPU is available but was not requested; set "
+               "SPLAT_TRAIN_DEVICE=cuda in the environment the server runs in"
+               if available else ""))
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     random.seed(args.seed)
@@ -243,6 +256,7 @@ def train(args, log=print):
         "per_view_psnr": scores,
         "scene_extent": extent,
         "suppressed_gradients": int(bad_grads),
+        "device": str(device),
         "sfm_seconds": round(sfm_seconds, 2),
         "train_seconds": round(train_seconds, 2),
         "resolution": [data[0]["width"], data[0]["height"]],
