@@ -150,6 +150,39 @@ The thing to understand before shooting:
   featureless white.
 - **OpenEXR is not supported.** Save as `.hdr` instead.
 
+#### Panorama detail
+
+A **Panorama detail** control appears once a 360 photo is selected. It sets the
+width the source is decoded at, and the size of the extracted views follows from
+it — those are not independent choices. A view of `fov` degrees at `size` pixels
+resolves the same detail as a source `size × 360 / fov` wide, so decoding at 16K
+and then extracting small views would throw away everything the larger source
+was for.
+
+Measured in Chromium, on the six views one panorama produces:
+
+| Detail | Source | Each view | Reproject | Peak decode |
+|---|---|---|---|---|
+| 2K | 2048 | 569 px | 0.4 s | 8 MB |
+| **4K** (default) | 4096 | 1138 px | 1.0 s | 34 MB |
+| 8K | 8192 | 2276 px | 3.1 s | 134 MB |
+| 16K | 16384 | 4551 px | 13.4 s | 537 MB |
+
+Against a test panorama carrying 569 resolvable transitions per view, 2K
+recovered 194 of them and every tier from 4K up recovered all 569 — so the
+lowest tier genuinely discards detail, and the higher ones genuinely keep it.
+
+Two things the setting will not do. It never upscales: the view size comes from
+the width actually decoded, which is capped at the file's own, so choosing 16K
+for a 4K panorama gives 4K-sized views rather than an expensive blur. And
+resolution is not sharpness — a soft or noisy panorama gains nothing from a
+higher tier, because the detail has to be in the file first.
+
+Training resolution rises with the tier, capped at 1600 (the reference
+implementation's own ceiling) because training cost is quadratic in it. Raise
+`trainResolution` in the request beyond that if you have the GPU for it; the
+server allows up to 3200.
+
 ---
 
 ## Configuration

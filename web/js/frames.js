@@ -8,8 +8,9 @@
  */
 
 import {
-  CUBE_FACES, DEFAULT_FACE_FOV_DEG, MAX_PANO_EDGE, decodeRadianceHdr, toneMap,
+  CUBE_FACES, DEFAULT_FACE_FOV_DEG, decodeRadianceHdr, toneMap, faceSizeFor,
   equirectToPerspective, looksEquirectangular, isHdrFile, isExrFile,
+  resolvePanoWidth,
 } from './pano.js';
 
 const DEFAULT_MAX_DIM = 640;
@@ -83,10 +84,18 @@ export async function extractFrames(files, options = {}) {
   const total = photos.length + panos.length * CUBE_FACES.length + videos.length * targetFrames;
   let done = 0;
 
+  // The source width, the extracted view size and the frames that get uploaded
+  // are one decision, not three: a 16k source reprojected into 512-pixel views
+  // discards everything it was decoded for.
+  const panoWidth = resolvePanoWidth(options.panoWidth);
+  const fovDeg = options.faceFovDeg || DEFAULT_FACE_FOV_DEG;
+  let faceSize = 0;
+
   for (const { file } of panos) {
     const views = await framesFromPano(file, {
-      size: maxDim,
-      fovDeg: options.faceFovDeg || DEFAULT_FACE_FOV_DEG,
+      sourceWidth: panoWidth,
+      fovDeg,
+      onSize: (n) => { faceSize = Math.max(faceSize, n); },
       onProgress: (i, name) => onProgress({
         done: done + i, total, label: `Reprojecting ${file.name} (${name})`,
       }),
@@ -122,7 +131,12 @@ export async function extractFrames(files, options = {}) {
 
   if (!frames.length) throw new Error('No frames could be read from that selection.');
   const kind = videos.length ? 'video' : (panos.length && !photos.length ? 'pano' : 'photos');
-  return { frames, kind, previews, panoCount: panos.length };
+  // faceSize travels with the result so the caller can tell the trainer what
+  // resolution the frames actually carry.
+  return {
+    frames, kind, previews, panoCount: panos.length,
+    frameSize: panos.length && !photos.length ? (faceSize || maxDim) : maxDim,
+  };
 }
 
 /**
@@ -156,12 +170,20 @@ export async function isPanorama(file) {
  * pinhole frames that structure-from-motion can pose, which is the whole point
  * of doing this here rather than shipping a 100 MB HDR over the network.
  */
-async function framesFromPano(file, { size, fovDeg, onProgress }) {
-  const source = isHdrFile(file) ? await readHdr(file) : await readLdrPano(file);
+async function framesFromPano(file, { sourceWidth, fovDeg, onProgress, onSize }) {
+  const source = isHdrFile(file)
+    ? await readHdr(file, sourceWidth)
+    : await readLdrPano(file, sourceWidth);
   if (!looksEquirectangular(source.width, source.height, 0.06)) {
     throw new Error(`${file.name} is ${source.width}x${source.height}, which is not the 2:1 `
       + 'shape of an equirectangular 360 photo.');
   }
+  // Derived from what was actually decoded, not from the tier that was asked
+  // for. A 4k panorama processed at the 16k tier decodes at its own 4k -- so
+  // sizing the views from the request would upscale, paying the larger tier's
+  // time, memory and training cost for detail the file never had.
+  const size = faceSizeFor(source.width, fovDeg);
+  onSize?.(size);
   const out = [];
   for (const face of CUBE_FACES) {
     const view = equirectToPerspective(source, face, { size, fovDeg });
@@ -172,11 +194,11 @@ async function framesFromPano(file, { size, fovDeg, onProgress }) {
 }
 
 /** Decode a Radiance HDR and tone map it to the 8-bit colour splats store. */
-async function readHdr(file) {
+async function readHdr(file, sourceWidth) {
   const bytes = new Uint8Array(await file.arrayBuffer());
   let decoded;
   try {
-    decoded = decodeRadianceHdr(bytes, { maxEdge: MAX_PANO_EDGE });
+    decoded = decodeRadianceHdr(bytes, { maxEdge: sourceWidth });
   } catch (err) {
     throw new Error(`${file.name} could not be read as a Radiance HDR: ${err.message}`);
   }
@@ -188,14 +210,18 @@ async function readHdr(file) {
 }
 
 /** Decode an already-tone-mapped equirectangular image through the canvas. */
-async function readLdrPano(file) {
+async function readLdrPano(file, sourceWidth) {
   let bitmap;
   try {
     // Resizing during decode keeps a 16k panorama from ever existing as a
     // full-size bitmap; the aspect ratio is preserved so the 2:1 check still
     // means what it says.
+    // Only ever downscale. Enlarging a 4k panorama to 16k would cost the time
+    // and memory of the larger tier while adding no detail at all, so a source
+    // smaller than the requested tier is decoded at its own size.
+    const decodeAt = Math.min(sourceWidth, await naturalWidth(file));
     bitmap = await createImageBitmap(file, {
-      resizeWidth: MAX_PANO_EDGE,
+      resizeWidth: decodeAt,
       resizeQuality: 'high',
       imageOrientation: 'from-image',
     });
@@ -329,4 +355,14 @@ function once(target, event, timeoutMs, message) {
     target.addEventListener(event, onEvent, { once: true });
     target.addEventListener('error', onError, { once: true });
   });
+}
+
+/** The panorama's own width, so a tier can never upscale it. */
+async function naturalWidth(file) {
+  const probe = await createImageBitmap(file);
+  try {
+    return probe.width;
+  } finally {
+    probe.close?.();
+  }
 }

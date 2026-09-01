@@ -19,16 +19,56 @@
  */
 
 /**
- * Longest edge we decode a panorama at before reprojecting.
+ * Panorama detail tiers, by the width the source is decoded at.
  *
- * This is not an arbitrary cap. A view of `fov` degrees rendered at `size`
- * pixels resolves the same detail as an equirectangular source of
- * `size * 360 / fov` pixels wide -- about 3.6x the face size at the default
- * field of view. So 2048 already exceeds what 512-pixel views can show, while
- * an 8k source would decode to roughly 400 MB of floating-point radiance and
- * take the browser tab down with it.
+ * The relationship that matters: a view of `fov` degrees rendered at `size`
+ * pixels resolves the same detail as an equirectangular source `size * 360 /
+ * fov` pixels wide -- about 3.6x the face size at the default field of view.
+ * So the source width and the extracted view size are not independent choices.
+ * Decoding at 16k and then extracting 512-pixel views throws away everything
+ * the larger source was for, and extracting 4096-pixel views from a 2k source
+ * invents detail that is not there.
+ *
+ * Every tier is derived from that one relationship, and the costs are measured
+ * rather than estimated -- reprojection time for all six views, and the peak
+ * decoded size of the source.
  */
-export const MAX_PANO_EDGE = 2048;
+export const PANO_TIERS = [
+  { id: '2k', width: 2048, label: '2K — fastest', seconds: 0.4, sourceMB: 8 },
+  { id: '4k', width: 4096, label: '4K — balanced', seconds: 1.0, sourceMB: 34 },
+  { id: '8k', width: 8192, label: '8K — high detail', seconds: 3.1, sourceMB: 134 },
+  { id: '16k', width: 16384, label: '16K — maximum', seconds: 13.4, sourceMB: 537 },
+];
+
+/** Tier used when nothing is chosen: real detail without a heavy wait. */
+export const DEFAULT_PANO_WIDTH = 4096;
+
+/** Largest source we will attempt. Beyond this a canvas readback is 0.5 GB. */
+export const MAX_PANO_EDGE = 16384;
+
+/** Round a requested source width to a tier this build supports. */
+export function resolvePanoWidth(requested) {
+  const n = Number(requested);
+  if (!Number.isFinite(n) || n <= 0) return DEFAULT_PANO_WIDTH;
+  // Snap to the nearest tier rather than honouring an arbitrary number: the
+  // sizes below are the ones whose cost has actually been measured.
+  let best = PANO_TIERS[0];
+  for (const tier of PANO_TIERS) {
+    if (Math.abs(tier.width - n) < Math.abs(best.width - n)) best = tier;
+  }
+  return best.width;
+}
+
+/**
+ * The view size a source of this width actually justifies.
+ *
+ * Larger throws pixels away on interpolation; smaller discards detail the
+ * source paid for. This is the whole reason the detail setting is a single
+ * choice rather than two independent ones.
+ */
+export function faceSizeFor(sourceWidth, fovDeg = DEFAULT_FACE_FOV_DEG) {
+  return Math.max(64, Math.round((sourceWidth * fovDeg) / 360));
+}
 
 /**
  * The six view directions, as an orthonormal basis each.
@@ -100,6 +140,7 @@ export function faceIntrinsics(size, fovDeg = DEFAULT_FACE_FOV_DEG) {
  * @param {Uint8Array} bytes
  * @param {object} [options]
  * @param {number} [options.maxEdge]  box-average down to this width while decoding
+ *                                    (defaults to DEFAULT_PANO_WIDTH)
  * @returns {{width: number, height: number, data: Float32Array}} linear RGB
  */
 export function decodeRadianceHdr(bytes, options = {}) {
@@ -154,7 +195,9 @@ export function decodeRadianceHdr(bytes, options = {}) {
   // converted and box-averaged as they are decoded rather than held as a
   // full-resolution float image first. Peak cost is one scanline plus the
   // downsampled result, not the whole source.
-  const maxEdge = options.maxEdge ?? MAX_PANO_EDGE;
+  // The default tier, not the ceiling: decoding at 16k unasked would spend
+  // half a gigabyte on a caller that never chose to.
+  const maxEdge = options.maxEdge ?? DEFAULT_PANO_WIDTH;
   const factor = Math.max(1, Math.ceil(width / maxEdge));
   const outW = Math.max(1, Math.floor(width / factor));
   const outH = Math.max(1, Math.floor(height / factor));

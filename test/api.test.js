@@ -20,6 +20,7 @@ const { createServer } = await import('../server/index.js');
 const store = await import('../server/store.js');
 const { encodePng } = await import('../server/pipeline/png.js');
 const { decodePly } = await import('../server/pipeline/ply.js');
+const { sanitiseSettings } = await import('../server/api.js');
 
 await store.init();
 const server = createServer();
@@ -334,4 +335,40 @@ test('an unknown capture kind falls back to photos rather than being stored', as
   const asset = await uploadCapture({ name: 'odd', kind: 'not-a-kind', frames: 4 });
   assert.equal(asset.kind, 'photos');
   await waitForStatus(asset.id, ['ready', 'failed']);
+});
+
+test('the settings that control detail actually reach the pipeline', async () => {
+  // trainResolution was missing from the whitelist, so every conversion ran at
+  // the 320-pixel default no matter what was asked for -- which put a hard
+  // ceiling on how much detail any splat could hold, panorama or not.
+  const kept = sanitiseSettings({
+    trainResolution: 1600, maxGaussians: 400_000, panoResolution: 8192,
+  });
+  assert.equal(kept.trainResolution, 1600);
+  assert.equal(kept.maxGaussians, 400_000);
+  assert.equal(kept.panoResolution, 8192);
+
+  // And they must survive the round trip to the store, not just the filter.
+  const asset = await uploadCapture({
+    name: 'Detailed', kind: 'pano', frames: 6,
+    settings: { trainResolution: 1600, panoResolution: 8192 },
+  });
+  const fetched = await waitForStatus(asset.id, ['ready', 'failed']);
+  assert.equal(fetched.settings.trainResolution, 1600);
+  assert.equal(fetched.settings.panoResolution, 8192);
+});
+
+test('an absurd detail setting is clamped rather than passed through', async () => {
+  // These reach a GPU allocation, so an unbounded value from a client is a way
+  // to take the machine down rather than a way to ask for quality.
+  const clamped = sanitiseSettings({
+    trainResolution: 999_999, maxGaussians: 99_000_000, panoResolution: 1_000_000,
+  });
+  assert.equal(clamped.trainResolution, 3200);
+  assert.equal(clamped.maxGaussians, 2_000_000);
+  assert.equal(clamped.panoResolution, 16_384);
+
+  const floored = sanitiseSettings({ trainResolution: -5, panoResolution: 1 });
+  assert.equal(floored.trainResolution, 96);
+  assert.equal(floored.panoResolution, 512);
 });

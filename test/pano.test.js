@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import {
   CUBE_FACES, DEFAULT_FACE_FOV_DEG, decodeRadianceHdr, rgbeToLinear, toneMap,
   linearToSrgb, equirectToPerspective, looksEquirectangular, faceIntrinsics,
-  isHdrFile, isExrFile, MAX_PANO_EDGE,
+  isHdrFile, isExrFile, MAX_PANO_EDGE, PANO_TIERS, DEFAULT_PANO_WIDTH,
+  resolvePanoWidth, faceSizeFor,
 } from '../web/js/pano.js';
 
 /**
@@ -423,14 +424,82 @@ test('a panorama is box-averaged down while it decodes', () => {
   assert.ok(Math.abs(ramp.data[3] - 20.5) < 1e-3, `got ${ramp.data[3]}`);
 });
 
-test('decoding stays under the default edge without being asked', () => {
-  // The cap has to apply by default, or the first 8k panorama a user drops in
-  // takes the tab down before any explicit option could have helped.
-  assert.ok(MAX_PANO_EDGE <= 4096, 'the cap must be small enough to matter');
-  const wide = decodeRadianceHdr(encodeHdr(MAX_PANO_EDGE * 2, 2, () => [64, 64, 64, 136]));
-  assert.equal(wide.width, MAX_PANO_EDGE);
-  // A panorama already within the cap is left at its own resolution.
+test('decoding stays at the default tier unless a larger one is asked for', () => {
+  // A caller that names no tier must not be handed the ceiling: the largest
+  // source is half a gigabyte decoded, which is a choice, not a default.
+  const wide = decodeRadianceHdr(encodeHdr(DEFAULT_PANO_WIDTH * 2, 2, () => [64, 64, 64, 136]));
+  assert.equal(wide.width, DEFAULT_PANO_WIDTH);
+
+  // Asking for a bigger tier gets it.
+  const bigger = decodeRadianceHdr(
+    encodeHdr(DEFAULT_PANO_WIDTH * 2, 2, () => [64, 64, 64, 136]),
+    { maxEdge: DEFAULT_PANO_WIDTH * 2 });
+  assert.equal(bigger.width, DEFAULT_PANO_WIDTH * 2);
+
+  // A panorama already smaller is left at its own resolution rather than
+  // being stretched to the tier it was compared against.
   const small = decodeRadianceHdr(encodeHdr(32, 16, () => [64, 64, 64, 136]));
   assert.equal(small.width, 32);
   assert.equal(small.height, 16);
+});
+
+test('the view size a tier extracts matches what its source can resolve', () => {
+  // A view of `fov` degrees at `size` pixels resolves the same detail as a
+  // source `size * 360 / fov` wide. Break this and the detail setting becomes
+  // a lie in one direction or the other: a large source reprojected into small
+  // views throws away everything it was decoded for, and small sources
+  // reprojected large invent detail that was never captured.
+  for (const tier of PANO_TIERS) {
+    const face = faceSizeFor(tier.width, DEFAULT_FACE_FOV_DEG);
+    const implied = (face * 360) / DEFAULT_FACE_FOV_DEG;
+    assert.ok(Math.abs(implied - tier.width) <= 2,
+      `${tier.id}: ${face}px views imply a ${Math.round(implied)}px source, not ${tier.width}`);
+  }
+});
+
+test('every panorama tier is bigger than the last and within what decodes', () => {
+  const widths = PANO_TIERS.map((t) => t.width);
+  assert.deepEqual(widths, [...widths].sort((a, b) => a - b), 'tiers must ascend');
+  assert.equal(new Set(widths).size, widths.length, 'tiers must be distinct');
+  for (const tier of PANO_TIERS) {
+    assert.ok(tier.width <= MAX_PANO_EDGE, `${tier.id} exceeds the decode ceiling`);
+    assert.ok(tier.seconds > 0 && tier.sourceMB > 0, `${tier.id} is missing its measured cost`);
+  }
+  assert.ok(widths.includes(DEFAULT_PANO_WIDTH), 'the default must be one of the tiers');
+});
+
+test('a requested width snaps to a tier whose cost was measured', () => {
+  assert.equal(resolvePanoWidth(8192), 8192);
+  assert.equal(resolvePanoWidth(9000), 8192, 'an arbitrary size must snap, not be honoured');
+  assert.equal(resolvePanoWidth(100), 2048, 'below every tier snaps to the smallest');
+  assert.equal(resolvePanoWidth(999999), 16384, 'above every tier snaps to the largest');
+  for (const bad of [undefined, null, 'huge', NaN, 0, -4096]) {
+    assert.equal(resolvePanoWidth(bad), DEFAULT_PANO_WIDTH, `${bad} should fall back`);
+  }
+});
+
+test('a wider field of view needs a wider source for the same view size', () => {
+  // The relationship has to hold at whatever field of view the views use, not
+  // just the default, or changing one silently degrades the other.
+  assert.ok(faceSizeFor(8192, 120) > faceSizeFor(8192, 90));
+  assert.equal(faceSizeFor(8192, 90), 2048);
+  // Never small enough to be useless, whatever is asked for.
+  assert.ok(faceSizeFor(1, 100) >= 64);
+});
+
+test('a tier never invents detail the panorama does not have', () => {
+  // Choosing 16k for a 4k file must not produce 16k-sized views. It would cost
+  // the larger tier's reprojection time, upload size and training resolution
+  // to deliver an upscale -- the setting would be charging for detail that was
+  // never captured. The view size therefore comes from the width actually
+  // decoded, which is capped at the file's own.
+  const fileWidth = 4096;
+  for (const tier of PANO_TIERS) {
+    const decoded = Math.min(tier.width, fileWidth);
+    const face = faceSizeFor(decoded);
+    assert.ok(face <= faceSizeFor(fileWidth),
+      `${tier.id} would upscale a ${fileWidth}px panorama to ${face}px views`);
+  }
+  // And a source larger than the tier is still limited by the tier.
+  assert.equal(faceSizeFor(Math.min(2048, 16384)), faceSizeFor(2048));
 });

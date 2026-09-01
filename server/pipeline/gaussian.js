@@ -26,7 +26,10 @@ export async function runGaussianTraining({
   await fsp.mkdir(workDir, { recursive: true });
 
   const iterations = clampInt(settings.iterations, 200, 60_000, 3000);
-  const resolution = clampInt(settings.trainResolution, 96, 1600, 320);
+  // The reference implementation downsamples to 1600; the ceiling here is
+  // higher because the cost is the caller's to spend and a 16k panorama can
+  // feed more than 1600 pixels of genuine detail.
+  const resolution = clampInt(settings.trainResolution, 96, 3200, 320);
   const maxGaussians = clampInt(settings.maxGaussians, 1000, 2_000_000, 150_000);
 
   const device = resolveDevice(settings.device);

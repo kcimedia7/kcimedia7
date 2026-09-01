@@ -1,6 +1,6 @@
 import { el, clear, toast, formatBytes } from './ui.js';
 import { extractFrames, isVideo, isPanorama } from './frames.js';
-import { CUBE_FACES } from './pano.js';
+import { CUBE_FACES, PANO_TIERS, DEFAULT_PANO_WIDTH, faceSizeFor } from './pano.js';
 import { api } from './api.js';
 
 /**
@@ -29,7 +29,7 @@ export function renderUpload(host, { capabilities, onCreated }) {
     busy: false,
     frames: null,
     previews: [],
-    settings: { targetFrames: 32, detail: 160, arcDeg: 360 },
+    settings: { targetFrames: 32, detail: 160, arcDeg: 360, panoWidth: DEFAULT_PANO_WIDTH },
   };
 
   const fileInput = el('input', {
@@ -62,6 +62,38 @@ export function renderUpload(host, { capabilities, onCreated }) {
 
   const summary = el('div', { class: 'preview-strip' });
   const panoNote = el('div', { class: 'note', style: { display: 'none' } });
+
+  const panoDetail = el('select', {
+    onchange: () => {
+      state.settings.panoWidth = Number(panoDetail.value);
+      describePanoDetail();
+    },
+  }, PANO_TIERS.map((tier) => el('option', {
+    value: String(tier.width),
+    ...(tier.width === DEFAULT_PANO_WIDTH ? { selected: 'selected' } : {}),
+  }, tier.label)));
+
+  const panoDetailCost = el('p', { class: 'hint' });
+  const panoDetailField = el('label', { class: 'field', style: { display: 'none' } },
+    el('span', { class: 'label' }, el('span', {}, 'Panorama detail')),
+    panoDetail, panoDetailCost);
+
+  /**
+   * Say what the chosen tier costs, in the terms it is actually paid in.
+   *
+   * The numbers are measured, not estimated, and they are the reason this is
+   * one control rather than two: the extracted view size follows from the
+   * source width, so choosing 16k and then extracting small views -- which is
+   * what a separate control invites -- would spend the whole cost for none of
+   * the detail.
+   */
+  function describePanoDetail() {
+    const tier = PANO_TIERS.find((t) => t.width === state.settings.panoWidth) || PANO_TIERS[1];
+    const face = faceSizeFor(tier.width);
+    clear(panoDetailCost).append(
+      `Each panorama becomes ${CUBE_FACES.length} views of ${face}x${face} px · `
+      + `about ${tier.seconds}s to reproject · ${tier.sourceMB} MB while decoding`);
+  }
   const nameInput = el('input', { type: 'text', placeholder: 'Name this capture' });
 
   const framesSlider = numberField('Frames to sample from video', 8, 120, 4, state.settings.targetFrames,
@@ -118,6 +150,7 @@ export function renderUpload(host, { capabilities, onCreated }) {
           el('span', { class: 'label' }, el('span', {}, 'Name')),
           nameInput),
         framesSlider,
+        panoDetailField,
         advanced,
         el('div', { class: 'group' }, submit))),
 
@@ -162,8 +195,14 @@ export function renderUpload(host, { capabilities, onCreated }) {
   async function describePanoramas(files) {
     const flags = await Promise.all(files.map((f) => isPanorama(f).catch(() => false)));
     const panos = flags.filter(Boolean).length;
-    if (!panos) { panoNote.style.display = 'none'; return; }
+    if (!panos) {
+      panoNote.style.display = 'none';
+      panoDetailField.style.display = 'none';
+      return;
+    }
     panoNote.style.display = '';
+    panoDetailField.style.display = '';
+    describePanoDetail();
     clear(panoNote).append(
       el('strong', {}, panos === 1 ? 'One 360 photo detected' : `${panos} 360 photos detected`),
       el('p', {}, panos === 1
@@ -191,8 +230,9 @@ export function renderUpload(host, { capabilities, onCreated }) {
 
     try {
       setProgress(0.02, 'Reading frames');
-      const { frames, kind, previews } = await extractFrames(state.files, {
+      const { frames, kind, previews, frameSize } = await extractFrames(state.files, {
         targetFrames: state.settings.targetFrames,
+        panoWidth: state.settings.panoWidth,
         // Feature matching lives or dies on resolution: SfM needs detail the
         // preview backend has no use for, so only pay the upload cost when the
         // backend will actually solve poses.
@@ -212,6 +252,15 @@ export function renderUpload(host, { capabilities, onCreated }) {
         arcDeg: state.settings.arcDeg,
         maxFrames: Math.max(8, state.settings.targetFrames),
         ...(state.settings.iterations ? { iterations: state.settings.iterations } : {}),
+        ...(kind === 'pano' ? {
+          panoResolution: state.settings.panoWidth,
+          // Without this the trainer keeps its 320-pixel default and a 16k
+          // panorama produces exactly the same splat as a 2k one -- the whole
+          // point of the setting, thrown away at the last step. Capped because
+          // training cost is quadratic in resolution and the frames are already
+          // far sharper than the optimiser needs beyond this.
+          trainResolution: Math.min(frameSize || 1024, 1600),
+        } : {}),
       }));
       frames.forEach((blob, i) => {
         form.append('frame', blob, `frame_${String(i + 1).padStart(5, '0')}.png`);

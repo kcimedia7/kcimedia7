@@ -311,6 +311,16 @@ export function sanitiseSettings(input) {
   num('arcDeg', 0, 360);
   num('splatScale', 0.1, 5);
   num('subjectThreshold', 0, 1);
+  // The resolution the trainer optimises at, which is what actually bounds how
+  // much detail a splat can hold. It was missing from this list, so every
+  // conversion silently used the default no matter what the client asked for.
+  // The ceiling is above the reference implementation's 1600 because cost is
+  // quadratic in it and the choice belongs to whoever owns the GPU.
+  num('trainResolution', 96, 3200);
+  num('maxGaussians', 1000, 2_000_000);
+  // Width the source panorama is decoded at; the client derives the extracted
+  // view size from it, so the two cannot drift apart.
+  num('panoResolution', 512, 16_384);
   return out;
 }
 
