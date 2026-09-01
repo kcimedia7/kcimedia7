@@ -26,7 +26,15 @@ export function renderDetail(host, { asset, onDeleted, onChanged }) {
   const overlay = el('div', { class: 'stage-overlay' });
   const stats = el('div', { class: 'stage-stats' });
   const tools = el('div', { class: 'stage-tools' });
-  const stage = el('div', { class: 'stage' }, canvas, overlay, stats, tools);
+  // Nobody guesses that keyboard flight exists. It fades once the pointer is
+  // over the stage, so it explains itself and then stays out of the way.
+  const help = el('div', { class: 'stage-help' },
+    el('kbd', {}, 'W'), el('kbd', {}, 'A'), el('kbd', {}, 'S'), el('kbd', {}, 'D'),
+    el('span', {}, 'move'),
+    el('kbd', {}, 'Q'), el('kbd', {}, 'E'), el('span', {}, 'up / down'),
+    el('kbd', {}, 'Shift'), el('span', {}, 'faster'),
+    el('span', {}, '· drag to orbit'));
+  const stage = el('div', { class: 'stage' }, canvas, overlay, stats, tools, help);
 
   const tabButtons = {};
   const tabBody = el('div', { class: 'tab-body' });

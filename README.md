@@ -185,6 +185,25 @@ server allows up to 3200.
 
 ---
 
+## Moving around a scene
+
+Drag to orbit, wheel to zoom, and fly with the keyboard:
+
+| Key | |
+|---|---|
+| `W` `A` `S` `D` / arrows | move through the scene |
+| `Q` / `E`, or `C` / `Space` | down / up |
+| `Shift` | three times faster |
+
+Speed follows the viewing distance rather than being fixed in world units — a
+tabletop capture and a street are both "one scene", and any fixed speed is
+unusable in one of them. Zooming out to see more also speeds up crossing it.
+
+Keys are bound by physical position, so the layout is the same on AZERTY and
+Dvorak, and they are ignored while a text field has focus.
+
+---
+
 ## Configuration
 
 All optional.

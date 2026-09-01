@@ -1,6 +1,21 @@
 import { lookAt, normalize, cross, add, scale, sub } from './mat.js';
 
-/** Orbit camera with mouse, wheel, and touch input. */
+/**
+ * Which key does what. Layout-independent: `event.code` reports the physical
+ * key, so W is the key where W sits on a QWERTY board whatever the user's
+ * layout says it types. Binding by `event.key` instead would scatter the
+ * controls across the keyboard on AZERTY and Dvorak.
+ */
+export const MOVE_KEYS = {
+  KeyW: 'forward', ArrowUp: 'forward',
+  KeyS: 'back', ArrowDown: 'back',
+  KeyA: 'left', ArrowLeft: 'left',
+  KeyD: 'right', ArrowRight: 'right',
+  KeyE: 'up', Space: 'up',
+  KeyQ: 'down', KeyC: 'down',
+};
+
+/** Orbit camera with mouse, wheel, touch, and keyboard fly-through. */
 export class OrbitCamera {
   constructor(canvas, { onChange } = {}) {
     this.canvas = canvas;
@@ -16,6 +31,18 @@ export class OrbitCamera {
     this.autoRotateSpeed = 0.25;
     this._pointers = new Map();
     this._pinchDistance = 0;
+    /** Movement directions currently held down. */
+    this.held = new Set();
+    this.boost = false;
+    /**
+     * Travel per second, as a fraction of the viewing distance.
+     *
+     * Tied to distance rather than fixed in world units because a splat scene
+     * has no inherent scale: a tabletop capture and a street are both "one
+     * scene", and a speed that suits either is unusable in the other. Zooming
+     * out to see more also speeds up crossing it, which is what one expects.
+     */
+    this.moveSpeed = 1.1;
     this._detach = this._attach();
   }
 
@@ -57,9 +84,50 @@ export class OrbitCamera {
   }
 
   tick(dtSeconds) {
-    if (!this.autoRotate || this._pointers.size) return false;
-    this.yaw += this.autoRotateSpeed * dtSeconds;
-    this.onChange();
+    let moved = this.applyMovement(dtSeconds);
+    if (this.autoRotate && !this._pointers.size) {
+      this.yaw += this.autoRotateSpeed * dtSeconds;
+      moved = true;
+    }
+    if (moved) this.onChange();
+    return moved;
+  }
+
+  /**
+   * Fly the camera by whatever movement keys are held.
+   *
+   * Scaled by elapsed time rather than counted per event, so travel is the
+   * same on a 30 fps laptop as on a 144 Hz monitor -- and so holding a key
+   * accelerates nothing when the tab stutters.
+   *
+   * Moving the orbit target is what carries the camera: it keeps its distance
+   * and angles, so dragging still orbits whatever you flew to rather than
+   * snapping back to where you started.
+   */
+  applyMovement(dtSeconds) {
+    if (!this.held.size) return false;
+    // A stalled tab can hand back a huge delta; clamping keeps a held key from
+    // teleporting the camera across the scene on the first frame back.
+    const dt = Math.min(Math.max(dtSeconds, 0), 0.1);
+    if (dt <= 0) return false;
+
+    const forward = normalize(sub(this.target, this.position));
+    const right = normalize(cross(forward, [0, 1, 0]));
+    const step = this.distance * this.moveSpeed * dt * (this.boost ? 3 : 1);
+
+    let delta = [0, 0, 0];
+    if (this.held.has('forward')) delta = add(delta, forward);
+    if (this.held.has('back')) delta = sub(delta, forward);
+    if (this.held.has('right')) delta = add(delta, right);
+    if (this.held.has('left')) delta = sub(delta, right);
+    if (this.held.has('up')) delta = add(delta, [0, 1, 0]);
+    if (this.held.has('down')) delta = sub(delta, [0, 1, 0]);
+
+    const length = Math.hypot(delta[0], delta[1], delta[2]);
+    // Opposite keys cancel exactly; diagonals must not travel faster than a
+    // straight line, which is what normalising prevents.
+    if (length < 1e-6) return false;
+    this.target = add(this.target, scale(delta, step / length));
     return true;
   }
 
@@ -124,6 +192,55 @@ export class OrbitCamera {
     };
     const menu = (e) => e.preventDefault();
 
+    /**
+     * Does this key event belong to someone typing?
+     *
+     * The keys are bound on the window so the viewer does not have to be
+     * focused to fly, which means every text field on the page shares them.
+     * Without this check, typing "would" into the notes field flies the camera
+     * across the scene and drops half the letters.
+     */
+    const isTyping = (e) => {
+      const t = e.target;
+      if (!t || t === el) return false;
+      if (t.isContentEditable) return true;
+      const tag = t.tagName;
+      return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+    };
+
+    const keyDown = (e) => {
+      if (isTyping(e) || e.ctrlKey || e.metaKey || e.altKey) return;
+      const direction = MOVE_KEYS[e.code];
+      if (!direction) return;
+      // Space and the arrows scroll the page otherwise, which fights the
+      // movement they are meant to drive.
+      e.preventDefault();
+      this.held.add(direction);
+      this.boost = e.shiftKey;
+    };
+    const keyUp = (e) => {
+      const direction = MOVE_KEYS[e.code];
+      if (direction) this.held.delete(direction);
+      this.boost = e.shiftKey;
+    };
+    /**
+     * Release everything when focus leaves.
+     *
+     * A key held as the window loses focus never delivers its keyup, so the
+     * camera would fly off in that direction forever and no amount of clicking
+     * back would stop it -- the key is not down any more, so there is nothing
+     * left to release it.
+     */
+    const release = () => { this.held.clear(); this.boost = false; };
+
+    const view = el.ownerDocument?.defaultView;
+    if (view?.addEventListener) {
+      view.addEventListener('keydown', keyDown);
+      view.addEventListener('keyup', keyUp);
+      view.addEventListener('blur', release);
+      el.ownerDocument.addEventListener('visibilitychange', release);
+    }
+
     el.addEventListener('pointerdown', down);
     el.addEventListener('pointermove', move);
     el.addEventListener('pointerup', up);
@@ -132,6 +249,12 @@ export class OrbitCamera {
     el.addEventListener('contextmenu', menu);
 
     return () => {
+      if (view?.removeEventListener) {
+        view.removeEventListener('keydown', keyDown);
+        view.removeEventListener('keyup', keyUp);
+        view.removeEventListener('blur', release);
+        el.ownerDocument.removeEventListener('visibilitychange', release);
+      }
       el.removeEventListener('pointerdown', down);
       el.removeEventListener('pointermove', move);
       el.removeEventListener('pointerup', up);

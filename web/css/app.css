@@ -713,3 +713,52 @@ input[type="color"] {
   font-size: 13px;
   line-height: 1.55;
 }
+
+/* ---------- viewer controls hint ---------- */
+
+/*
+ * Keyboard flight is not discoverable on its own, so the stage says what it
+ * offers. It fades while the pointer is over the canvas: the moment someone is
+ * actually flying is the moment the legend is in the way.
+ */
+.stage-help {
+  position: absolute;
+  bottom: 12px;
+  right: 12px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  border-radius: 6px;
+  background: #0d1017aa;
+  backdrop-filter: blur(8px);
+  color: var(--text-faint);
+  font-size: 11px;
+  pointer-events: none;
+  transition: opacity 0.25s ease;
+}
+
+.stage:hover .stage-help {
+  opacity: 0.15;
+}
+
+.stage-help kbd {
+  font: inherit;
+  font-family: var(--mono, ui-monospace, monospace);
+  color: var(--text-dim);
+  background: #1a1e2a;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 1px 5px;
+  line-height: 1.5;
+}
+
+.stage-help span {
+  margin-right: 4px;
+}
+
+@media (max-width: 720px) {
+  /* No keyboard to speak of, and the stage is small enough that the legend
+     would cover the subject. */
+  .stage-help { display: none; }
+}
