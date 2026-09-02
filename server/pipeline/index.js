@@ -3,6 +3,7 @@ import path from 'node:path';
 import { decodePng, encodePng } from './png.js';
 import { fitWithin } from './imageops.js';
 import { encodePly, decodePly } from './ply.js';
+import { runDepthReconstruction } from './depth.js';
 import { encodeSplatBuffer, boundsOf, filterCloud } from './splat.js';
 import { reconstructPreview } from './preview.js';
 import { detectCapabilities } from './backends.js';
@@ -33,6 +34,13 @@ const PLANS = {
     { id: 'train', label: 'Reconstructing', weight: 0.88 },
     { id: 'export', label: 'Writing splat files', weight: 0.08 },
   ],
+  // Inferred rather than solved: one panorama, six depth estimates, no poses
+  // to recover because there is only ever one viewpoint.
+  depth: [
+    { id: 'ingest', label: 'Reading frames', weight: 0.04 },
+    { id: 'estimate', label: 'Estimating depth', weight: 0.88 },
+    { id: 'export', label: 'Writing splat files', weight: 0.08 },
+  ],
 };
 
 export function stagePlan(backend) {
@@ -53,9 +61,8 @@ export function stagePlan(backend) {
  */
 export async function convert(ctx) {
   const caps = await detectCapabilities();
-  const backend = ctx.settings.backend && ctx.settings.backend !== 'auto'
-    ? ctx.settings.backend
-    : caps.backend;
+  const framePaths = await listFrames(ctx.framesDir);
+  const backend = chooseBackend(ctx.settings, caps, framePaths.length);
   const plan = stagePlan(backend);
 
   const progress = stageProgress(plan, ctx.onProgress);
@@ -65,10 +72,9 @@ export async function convert(ctx) {
   for (const reason of caps.reasons) log(reason);
 
   progress.enter('ingest');
-  const framePaths = await listFrames(ctx.framesDir);
   if (!framePaths.length) throw new Error('no frames were uploaded for this capture');
   log(`${framePaths.length} frame(s) ready`);
-  refuseSingleViewpoint(ctx.settings.kind, framePaths.length);
+  if (backend !== 'depth') refuseSingleViewpoint(ctx.settings.kind, framePaths.length);
 
   let cloud;
   let stats;
@@ -104,6 +110,28 @@ export async function convert(ctx) {
     };
     if (report?.psnr) log(`reconstruction quality: ${report.psnr.toFixed(2)} dB PSNR`);
     progress.done('train');
+  } else if (backend === 'depth') {
+    progress.done('ingest');
+    progress.enter('estimate');
+    const { plyPath, report } = await runDepthReconstruction({
+      imagesDir: ctx.framesDir,
+      outputDir: path.join(ctx.workDir, 'depth'),
+      settings: ctx.settings,
+      log: (line) => { log(line); progress.nudge(); },
+      onProgress: ({ fraction, label }) => progress.within('estimate', fraction, label),
+      signal: ctx.signal,
+    });
+    cloud = decodePly(await fsp.readFile(plyPath));
+    stats = {
+      frames: framePaths.length,
+      splats: cloud.count,
+      // Named so it cannot be mistaken for a measurement further down.
+      depth: 'inferred',
+      depthModel: report?.model,
+      device: report?.device,
+    };
+    log(`built ${cloud.count.toLocaleString()} gaussians from inferred depth`);
+    progress.done('estimate');
   } else if (backend === 'colmap') {
     progress.done('ingest');
     progress.enter('poses');
@@ -206,6 +234,22 @@ export function pickEvenly(items, max) {
     out.push(items[Math.round((i * (items.length - 1)) / (max - 1))]);
   }
   return [...new Set(out)];
+}
+
+/**
+ * Which backend runs this capture.
+ *
+ * An explicit choice always wins. Otherwise a lone panorama is routed to depth
+ * inference, because it is the only thing that can produce anything at all
+ * from one viewpoint -- solving it would spend minutes to arrive at the same
+ * impossibility every time.
+ */
+export function chooseBackend(settings = {}, caps = {}, frameCount = 0) {
+  if (settings.backend && settings.backend !== 'auto') return settings.backend;
+  if (settings.kind === 'pano' && frameCount > 0 && frameCount <= VIEWS_PER_PANORAMA) {
+    return 'depth';
+  }
+  return caps.backend || 'preview';
 }
 
 /** Views a single panorama is resampled into, matching the browser's ingest. */

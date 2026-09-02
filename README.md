@@ -30,7 +30,7 @@ node server/index.js     # http://127.0.0.1:8787
 
 ---
 
-## The three backends
+## The four backends
 
 A real 3D Gaussian Splat needs two things: structure-from-motion to recover
 where each photo was taken, then gradient-descent optimisation of the gaussians
@@ -398,6 +398,41 @@ The most common cause is a capture with too little parallax. Walking straight
 down a road or straight towards a subject moves the camera along its own view
 direction, which barely constrains depth; the solve is poorly conditioned and
 can diverge. Orbiting around the subject fixes it.
+
+---
+
+## One 360 photo: the `depth` backend
+
+A single panorama cannot be reconstructed. Every ray in it passes through one
+point, so there is no parallax and nothing to triangulate — that is a property
+of the capture, not a setting. Upload one anyway and the pipeline routes it to
+depth inference instead of spending minutes proving the point.
+
+A monocular depth model predicts a distance for every pixel of the six views
+the panorama is reprojected into. Those pixels are unprojected into space and
+become gaussians. What comes out is explorable, and it is **inferred, not
+measured**:
+
+- Distances are plausible, not correct, and the overall scale is arbitrary —
+  nothing in one photograph says whether a cove is 20 or 200 metres across.
+- Anything hidden behind something else has no data. Move far from the original
+  viewpoint and you find the gaps.
+- Sky and open water are the hardest cases: sky has to be pushed to a finite
+  distance or it breaks every bounding box, and reflections read as geometry.
+
+The library labels these conversions **"Predicted from one photo, not
+measured"** so they cannot be mistaken for reconstructions.
+
+It needs one extra package, and one download the first time:
+
+```
+pip install transformers
+```
+
+Each of the six views is estimated separately, so each comes back on its own
+arbitrary scale — unaligned, the same wall sits at different distances in
+neighbouring views and the scene has a seam at every edge. The views overlap by
+design, so a per-face scale is solved from where they disagree.
 
 ---
 

@@ -255,3 +255,50 @@ test('a single panorama is refused before the solver wastes minutes on it', asyn
   assert.doesNotThrow(() => refuseSingleViewpoint('photos', 4));
   assert.doesNotThrow(() => refuseSingleViewpoint('video', 6));
 });
+
+test('a lone panorama is routed to depth inference rather than to the solver', async () => {
+  // Solving it would spend minutes arriving at the same impossibility every
+  // time, and inference is the only thing that produces anything from one
+  // viewpoint.
+  const { chooseBackend } = await import('../server/pipeline/index.js');
+  const caps = { backend: 'gaussian' };
+
+  assert.equal(chooseBackend({ kind: 'pano' }, caps, 6), 'depth');
+  assert.equal(chooseBackend({ kind: 'pano' }, caps, 3), 'depth');
+
+  // Two panoramas have a baseline, so they go to the solver like anything else.
+  assert.equal(chooseBackend({ kind: 'pano' }, caps, 12), 'gaussian');
+  assert.equal(chooseBackend({ kind: 'photos' }, caps, 4), 'gaussian');
+  assert.equal(chooseBackend({ kind: 'video' }, caps, 6), 'gaussian');
+
+  // An explicit choice always wins, in both directions.
+  assert.equal(chooseBackend({ kind: 'pano', backend: 'preview' }, caps, 6), 'preview');
+  assert.equal(chooseBackend({ kind: 'photos', backend: 'depth' }, caps, 40), 'depth');
+  assert.equal(chooseBackend({ kind: 'pano', backend: 'auto' }, caps, 6), 'depth');
+
+  // With nothing detected at all there is still a sane answer.
+  assert.equal(chooseBackend({}, {}, 0), 'preview');
+});
+
+test('the depth stage plan covers the whole progress bar', async () => {
+  const plan = stagePlan('depth');
+  const total = plan.reduce((sum, s) => sum + s.weight, 0);
+  assert.ok(Math.abs(total - 1) < 1e-9, `weights sum to ${total}`);
+  assert.deepEqual(plan.map((s) => s.id), ['ingest', 'estimate', 'export']);
+});
+
+test('depth progress follows the estimator through its six views', async () => {
+  const { parseProgress } = await import('../server/pipeline/depth.js');
+
+  assert.match(parseProgress('depth: reading 6 views from /x').label, /Reading/);
+  // The first run downloads the model and says nothing for a long time, so the
+  // bar has to show that it is loading rather than appear stuck at zero.
+  assert.match(parseProgress('depth: loading depth-anything/x on cuda').label, /Loading/);
+
+  const third = parseProgress('depth: estimating back (3/6)');
+  const fifth = parseProgress('depth: estimating up (5/6)');
+  assert.ok(fifth.fraction > third.fraction, 'progress must advance with the views');
+  assert.match(third.label, /back/);
+  assert.ok(parseProgress('wrote /x/point_cloud.ply (500 gaussians, 1 bytes)').fraction === 1);
+  assert.equal(parseProgress('something else entirely'), null);
+});

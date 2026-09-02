@@ -196,6 +196,11 @@ export function renderDetail(host, { asset, onDeleted, onChanged }) {
       row('Source', SOURCE_LABEL[current.kind] || 'Photos'),
       row('Frames used', formatCount(current.source?.frameCount)),
       row('Backend', current.backend || '—'),
+      // A depth-inferred scene sits in the same library beside measured ones,
+      // and the numbers beside it look identical. Say which it is.
+      current.result?.stats?.depth === 'inferred'
+        ? row('Geometry', 'Predicted from one photo, not measured')
+        : null,
       r ? row('Gaussians', formatCount(r.splatCount)) : null,
       r ? row('PLY size', formatBytes(r.plyBytes)) : null,
       r?.stats?.iterations ? row('Iterations', formatCount(r.stats.iterations)) : null,

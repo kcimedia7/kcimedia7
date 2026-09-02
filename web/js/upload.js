@@ -220,9 +220,11 @@ export function renderUpload(host, { capabilities, onCreated }) {
       el('strong', {}, panos === 1 ? 'One 360 photo detected' : `${panos} 360 photos detected`),
       el('p', {}, panos === 1
         ? 'A single panorama is taken from one point, so it carries no parallax and '
-          + 'cannot yield real depth. You will get a textured shell around the camera '
-          + 'rather than measured geometry. For a true reconstruction, shoot two or more '
-          + 'panoramas a step or two apart.'
+          + 'nothing can measure depth from it. This will be converted by predicting '
+          + 'depth instead — a model guesses what is near and what is far, which is '
+          + 'usually convincing but is inferred rather than measured, and leaves gaps '
+          + 'behind whatever it could not see. For measured geometry, shoot two or '
+          + 'more panoramas a step or two apart.'
         : `Each panorama becomes ${PANO_VIEWS} perspective views, so ${panos} shots upload as `
           + `${panos * PANO_VIEWS} frames. Reconstruction quality depends on the panoramas `
           + 'being taken from genuinely different positions, not just different angles.'));

@@ -303,7 +303,9 @@ export function sanitiseSettings(input) {
     const n = Number(input[key]);
     if (Number.isFinite(n)) out[key] = Math.min(hi, Math.max(lo, n));
   };
-  if (['auto', 'preview', 'colmap'].includes(input.backend)) out.backend = input.backend;
+  if (['auto', 'preview', 'colmap', 'gaussian', 'depth'].includes(input.backend)) {
+    out.backend = input.backend;
+  }
   if (['sequential', 'exhaustive'].includes(input.matcher)) out.matcher = input.matcher;
   num('iterations', 100, 60_000);
   num('maxFrames', 1, 600);

@@ -1,0 +1,338 @@
+"""Single-panorama depth geometry, checked against a scene whose answer is known.
+
+The failure mode here is quiet. A sign error in the ray basis, or forgetting
+that a model reports depth along the optical axis rather than along the ray,
+produces a cloud that still looks like a scene from the original viewpoint --
+it is only wrong once you move, which is the entire point of building it.
+
+So these tests unproject synthetic depth from a shape whose geometry is known
+exactly, and check the points land on it.
+"""
+
+import json
+import re
+import sys
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from splatworks_train.depth import (                                  # noqa: E402
+    CUBE_FACES, FACE_NAMES, align_scales, build_cloud, disparity_to_depth,
+    face_basis, overlap_samples, ray_directions, unproject,
+)
+
+FOV = 100.0
+SIZE = 48
+
+
+def test_the_face_table_matches_the_one_the_browser_reprojects_with():
+    """Two copies of the same table, in two languages.
+
+    If they drift, the views are extracted with one geometry and unprojected
+    with another. The cloud comes out folded inside out and nothing reports an
+    error, so the check is mechanical rather than by eye.
+    """
+    source = (Path(__file__).resolve().parents[2] / "web" / "js" / "pano.js").read_text()
+    block = re.search(r"export const CUBE_FACES = \[(.*?)\n\];", source, re.S)
+    assert block, "could not find CUBE_FACES in pano.js"
+
+    entries = re.findall(
+        r"\{\s*name:\s*'(\w+)',\s*forward:\s*(\[[^\]]*\]),\s*right:\s*(\[[^\]]*\]),"
+        r"\s*up:\s*(\[[^\]]*\])\s*\}",
+        block.group(1))
+    assert len(entries) == len(CUBE_FACES), f"found {len(entries)} faces in pano.js"
+
+    for (name, forward, right, up), (py_name, py_f, py_r, py_u) in zip(entries, CUBE_FACES):
+        assert name == py_name, f"face order differs: {name} vs {py_name}"
+        assert json.loads(forward) == list(py_f), f"{name} forward differs"
+        assert json.loads(right) == list(py_r), f"{name} right differs"
+        assert json.loads(up) == list(py_u), f"{name} up differs"
+
+
+def test_every_ray_is_a_unit_vector_and_the_centre_looks_along_the_axis():
+    for name in FACE_NAMES:
+        dirs = ray_directions(name, SIZE, FOV)
+        lengths = np.linalg.norm(dirs, axis=2)
+        assert np.allclose(lengths, 1.0, atol=1e-6), f"{name} rays are not unit length"
+        forward, _, _ = face_basis(name)
+        mid = SIZE // 2
+        # The centre of an even-sized image sits half a pixel off the axis.
+        assert dirs[mid, mid] @ forward > 0.999, f"{name} centre does not look forward"
+
+
+def test_the_six_views_cover_every_direction():
+    # A gap in coverage is a hole in the finished scene.
+    dirs = np.concatenate([ray_directions(n, SIZE, FOV).reshape(-1, 3) for n in FACE_NAMES])
+    probes = np.random.default_rng(0).normal(size=(2000, 3))
+    probes /= np.linalg.norm(probes, axis=1, keepdims=True)
+    # Every probe direction should have some ray close to it.
+    best = (probes @ dirs.T).max(axis=1)
+    assert best.min() > 0.99, f"a direction is uncovered (best alignment {best.min():.3f})"
+
+
+def test_a_sphere_of_constant_depth_unprojects_onto_a_sphere():
+    """The check that catches the cosine.
+
+    Constant depth *along the optical axis* is not a sphere -- it is a plane in
+    front of each face. Constant radial distance is the sphere. If the cosine
+    correction were missing, this would come back as a cube.
+    """
+    radius = 4.0
+    for name in FACE_NAMES:
+        dirs = ray_directions(name, SIZE, FOV)
+        forward, _, _ = face_basis(name)
+        # Depth along the axis for a point at constant radius.
+        axis_depth = radius * (dirs @ forward)
+        points = unproject(name, axis_depth, FOV)
+        distances = np.linalg.norm(points, axis=2)
+        assert np.allclose(distances, radius, atol=1e-4), (
+            f"{name}: radii range {distances.min():.4f}..{distances.max():.4f}, "
+            "which means the depth was treated as radial")
+
+
+def test_a_flat_wall_stays_flat():
+    # A plane at constant z in front of the front face must unproject to a
+    # plane, not a bowl. This is the same cosine seen from the other side.
+    distance = 3.0
+    dirs = ray_directions("front", SIZE, FOV)
+    axis_depth = np.full((SIZE, SIZE), distance)
+    points = unproject("front", axis_depth, FOV)
+    assert np.allclose(points[:, :, 2], distance, atol=1e-5), "the wall came out curved"
+
+
+def test_disparity_becomes_depth_with_the_sky_pushed_back_but_finite():
+    # Sky reads as near-zero disparity. Inverting it naively gives infinity,
+    # which no renderer and no bounding box can cope with.
+    disparity = np.array([[10.0, 5.0, 1.0, 1e-6, 0.0]])
+    depth = disparity_to_depth(disparity, near=1.0, far_ratio=50.0)
+    assert np.all(np.isfinite(depth)), "sky became infinite"
+    assert depth[0, 0] < depth[0, 1] < depth[0, 2], "near things must be nearer"
+    assert depth[0, 3] == pytest.approx(depth[0, 4]), "everything past the cap is the cap"
+    # The far cap is measured from the anchor -- a high percentile of the
+    # disparity, not its maximum, so one speckled pixel cannot set the scale.
+    assert depth.max() == pytest.approx(1.0 * 50.0, rel=0.02)
+
+
+def test_depth_that_says_nothing_is_refused():
+    with pytest.raises(ValueError):
+        disparity_to_depth(np.full((4, 4), np.nan))
+    with pytest.raises(ValueError):
+        disparity_to_depth(np.zeros((4, 4)))
+
+
+def test_faces_estimated_on_different_scales_are_brought_together():
+    """Each face is estimated alone, so each has its own arbitrary scale.
+
+    Unaligned, the same wall sits at different distances in adjacent views and
+    the fused scene has a seam at every edge.
+    """
+    truth = 5.0
+    names = list(FACE_NAMES)
+    # Every face sees the same sphere, but reports it scaled differently.
+    applied = np.array([1.0, 2.5, 0.4, 1.7, 0.7, 3.1])
+    depths = []
+    for name, factor in zip(names, applied):
+        dirs = ray_directions(name, SIZE, FOV)
+        forward, _, _ = face_basis(name)
+        depths.append(truth * (dirs @ forward) / factor)
+
+    pairs = []
+    for i in range(len(names)):
+        for j in range(i + 1, len(names)):
+            a, b = overlap_samples(names[i], names[j], SIZE, FOV, depths[i], depths[j])
+            if a.size:
+                pairs.append((i, j, a, b))
+    assert pairs, "the views should overlap enough to align them"
+
+    solved = align_scales(names, pairs)
+    # Only ratios are recoverable, so compare against the truth up to a
+    # constant -- pinned on the first face, which is what align_scales fixes.
+    expected = applied / applied[0]
+    recovered = solved / solved[0]
+    error = np.abs(recovered / expected - 1.0).max()
+    assert error < 0.05, f"scales off by up to {error:.1%}: {recovered} vs {expected}"
+
+
+def test_alignment_leaves_matching_faces_alone_and_survives_no_overlap():
+    names = list(FACE_NAMES)
+    assert np.allclose(align_scales(names, []), 1.0), "no overlap must not invent scales"
+
+    # Faces that already agree must not be moved.
+    depths = []
+    for name in names:
+        dirs = ray_directions(name, SIZE, FOV)
+        forward, _, _ = face_basis(name)
+        depths.append(3.0 * (dirs @ forward))
+    pairs = []
+    for i in range(len(names)):
+        for j in range(i + 1, len(names)):
+            a, b = overlap_samples(names[i], names[j], SIZE, FOV, depths[i], depths[j])
+            if a.size:
+                pairs.append((i, j, a, b))
+    assert np.allclose(align_scales(names, pairs), 1.0, atol=0.02)
+
+
+def test_a_whole_panorama_fuses_into_a_cloud_on_the_shape_it_came_from():
+    # End to end over the pure half: a sphere in, a spherical shell out, with
+    # colour carried through and gaussians sized to leave no gaps.
+    radius = 6.0
+    images, disparities = [], []
+    for name in FACE_NAMES:
+        dirs = ray_directions(name, SIZE, FOV)
+        forward, _, _ = face_basis(name)
+        axis_depth = radius * (dirs @ forward)
+        disparities.append(1.0 / axis_depth)
+        rgb = np.zeros((SIZE, SIZE, 3), dtype=np.uint8)
+        rgb[:, :, 0] = 200
+        images.append((name, rgb))
+
+    positions, colours, radii = build_cloud(images, disparities, FOV, max_points=0)
+    assert positions.shape[0] == len(FACE_NAMES) * SIZE * SIZE
+    assert np.isfinite(positions).all()
+
+    distances = np.linalg.norm(positions, axis=1)
+    # One scale for the whole cloud, so the shell has a constant radius even
+    # though the absolute value is arbitrary.
+    assert distances.std() / distances.mean() < 0.02, "the shell is not uniform"
+
+    assert np.allclose(colours[:, 0], 200 / 255.0, atol=1e-3)
+    assert np.allclose(colours[:, 1], 0.0)
+    # On a shell of constant radius every gaussian is the same size, which is
+    # itself the check that they are sized by radial distance rather than by
+    # depth along each face's axis.
+    assert radii.min() > 0
+    assert radii.std() / radii.mean() < 0.02, "gaussian size varies across a uniform shell"
+
+
+def test_gaussians_grow_with_distance_so_far_surfaces_have_no_gaps():
+    # A scene with real depth variation: a wall much further away on one side.
+    images, disparities = [], []
+    for name in FACE_NAMES:
+        dirs = ray_directions(name, SIZE, FOV)
+        forward, _, _ = face_basis(name)
+        cos_axis = dirs @ forward
+        # Radial distance ramps from 2 to 20 across the scene.
+        radial = 2.0 + 18.0 * (dirs[:, :, 0] * 0.5 + 0.5)
+        disparities.append(1.0 / (radial * cos_axis))
+        images.append((name, np.full((SIZE, SIZE, 3), 100, dtype=np.uint8)))
+
+    positions, _, radii = build_cloud(images, disparities, FOV, max_points=0)
+    distances = np.linalg.norm(positions, axis=1)
+    correlation = np.corrcoef(distances, radii)[0, 1]
+    assert correlation > 0.99, (
+        f"gaussian size should track distance, correlation {correlation:.3f}")
+
+
+def test_the_cloud_is_capped_without_biasing_where_the_points_come_from():
+    images, disparities = [], []
+    for name in FACE_NAMES:
+        dirs = ray_directions(name, SIZE, FOV)
+        forward, _, _ = face_basis(name)
+        disparities.append(1.0 / (5.0 * (dirs @ forward)))
+        images.append((name, np.full((SIZE, SIZE, 3), 128, dtype=np.uint8)))
+
+    positions, colours, radii = build_cloud(images, disparities, FOV, max_points=1000)
+    assert positions.shape[0] == 1000
+    assert colours.shape[0] == 1000 and radii.shape[0] == 1000
+    # A cap that took the first N would leave a cloud covering one face.
+    assert np.abs(positions.mean(axis=0)).max() < 0.6, "the sample is lopsided"
+
+
+def test_the_views_are_read_by_direction_not_by_filename_order(tmp_path):
+    """A sorted listing puts 'back' first, which rotates the whole scene.
+
+    Nothing errors when that happens: the cloud is built, it has the right
+    number of points, and it is turned ninety degrees from the photograph.
+    """
+    from PIL import Image
+    from splatworks_train.from_panorama import load_faces
+
+    for index, name in enumerate(FACE_NAMES):
+        rgb = np.zeros((8, 8, 3), dtype=np.uint8)
+        rgb[:, :, 0] = index * 40          # a tag identifying which face this is
+        Image.fromarray(rgb).save(tmp_path / f"frame_{index:05d}_{name}.png")
+
+    loaded = load_faces(tmp_path)
+    assert [name for name, _ in loaded] == list(FACE_NAMES), "faces came back out of order"
+    for index, (_, rgb) in enumerate(loaded):
+        assert rgb[0, 0, 0] == index * 40, "a face was matched to the wrong image"
+
+
+def test_a_missing_view_is_named_rather_than_silently_reconstructed(tmp_path):
+    from PIL import Image
+    from splatworks_train.from_panorama import load_faces
+
+    for name in FACE_NAMES[:4]:
+        Image.fromarray(np.zeros((8, 8, 3), np.uint8)).save(tmp_path / f"{name}.png")
+    with pytest.raises(SystemExit, match="up|down"):
+        load_faces(tmp_path)
+
+
+def test_the_whole_panorama_path_runs_without_a_downloaded_model(tmp_path, monkeypatch):
+    """Everything except the model itself, end to end.
+
+    The model is the one piece that needs a download, so it is swapped for a
+    known depth field. That leaves the parts that can actually be wrong --
+    reading, unprojecting, aligning, writing -- under test.
+    """
+    from PIL import Image
+    from splatworks_train import from_panorama
+
+    images = tmp_path / "images"
+    images.mkdir()
+    for index, name in enumerate(FACE_NAMES):
+        rgb = np.full((32, 32, 3), 60 + index * 20, dtype=np.uint8)
+        Image.fromarray(rgb).save(images / f"frame_{index:05d}_{name}.png")
+
+    # A sphere at radius 5, expressed the way a model would report it, and with
+    # a different arbitrary scale per face so alignment has work to do.
+    scale_by_call = iter([1.0, 2.0, 0.5, 1.5, 0.8, 1.2])
+
+    def fake_estimate(_estimator, rgb):
+        size = rgb.shape[0]
+        name = FACE_NAMES[fake_estimate.calls]
+        fake_estimate.calls += 1
+        dirs = ray_directions(name, size, 100.0)
+        forward, _, _ = face_basis(name)
+        axis_depth = 5.0 * (dirs @ forward)
+        return next(scale_by_call) / axis_depth
+    fake_estimate.calls = 0
+
+    # main() imports these inside the function, so patching the module they
+    # come from is enough and no download happens.
+    import splatworks_train.depth_model as depth_model
+    monkeypatch.setattr(depth_model, "load_estimator", lambda *a, **k: object())
+    monkeypatch.setattr(depth_model, "estimate", fake_estimate)
+
+    out = tmp_path / "out"
+    assert from_panorama.main([
+        "--images", str(images), "--output", str(out), "--max-points", "0",
+    ]) == 0
+
+    report = json.loads((out / "report.json").read_text())
+    assert report["gaussians"] == len(FACE_NAMES) * 32 * 32
+    assert report["views"] == 6
+    assert report["depth"] == "inferred", "the result must say it was not measured"
+
+    # The written file must be a real 3DGS ply that the rest of the app reads.
+    raw = (out / "point_cloud.ply").read_bytes()
+    header = raw[:raw.index(b"end_header")].decode("ascii")
+    assert "f_dc_0" in header and "opacity" in header and "scale_0" in header
+    assert "f_rest" not in header, "a depth cloud has no view-dependent colour to store"
+
+    names = [line.split()[-1] for line in header.splitlines()
+             if line.startswith("property float")]
+    values = np.frombuffer(raw[raw.index(b"end_header\n") + 11:],
+                           dtype="<f4").reshape(-1, len(names))
+    at = {name: i for i, name in enumerate(names)}
+    xyz = values[:, [at["x"], at["y"], at["z"]]]
+    assert np.isfinite(xyz).all()
+
+    # The six faces were given different scales; if alignment worked they land
+    # on one shell rather than six.
+    distances = np.linalg.norm(xyz, axis=1)
+    assert distances.std() / distances.mean() < 0.05, (
+        f"the faces did not align: radii {distances.min():.2f}..{distances.max():.2f}")
