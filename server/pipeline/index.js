@@ -68,6 +68,7 @@ export async function convert(ctx) {
   const framePaths = await listFrames(ctx.framesDir);
   if (!framePaths.length) throw new Error('no frames were uploaded for this capture');
   log(`${framePaths.length} frame(s) ready`);
+  refuseSingleViewpoint(ctx.settings.kind, framePaths.length);
 
   let cloud;
   let stats;
@@ -205,6 +206,29 @@ export function pickEvenly(items, max) {
     out.push(items[Math.round((i * (items.length - 1)) / (max - 1))]);
   }
   return [...new Set(out)];
+}
+
+/** Views a single panorama is resampled into, matching the browser's ingest. */
+const VIEWS_PER_PANORAMA = 6;
+
+/**
+ * Stop a capture that cannot contain depth, before spending minutes proving it.
+ *
+ * One 360 photo has one optical centre. Every ray it recorded passes through a
+ * single point, so no two views of it have a baseline, and depth cannot be
+ * triangulated at any resolution or iteration count. Structure-from-motion does
+ * fail on it -- but it fails after minutes of feature matching, reporting too
+ * little overlap or texture, which is the one explanation that is definitely
+ * wrong here and sends people off to reshoot with more frames of the same
+ * thing.
+ */
+export function refuseSingleViewpoint(kind, frameCount) {
+  if (kind !== 'pano' || frameCount > VIEWS_PER_PANORAMA) return;
+  throw new Error(
+    'A single 360 photo cannot be reconstructed. Every ray in it passes through '
+    + 'one point, so there is no parallax to measure depth from -- this is a '
+    + 'property of the capture, not a setting to raise. Shoot two or more '
+    + 'panoramas a step or two apart and convert them together.');
 }
 
 /**

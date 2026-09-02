@@ -237,3 +237,21 @@ test('the inspector finds conversions without being handed a path', async () => 
 
   await fsp.rm(dir, { recursive: true, force: true });
 });
+
+test('a single panorama is refused before the solver wastes minutes on it', async () => {
+  // One 360 photo has one optical centre, so no two of its views have a
+  // baseline and depth cannot be triangulated. COLMAP does fail on it -- but
+  // only after minutes of feature matching, and it reports too little overlap
+  // or texture, which is the one explanation that is definitely wrong here.
+  const { refuseSingleViewpoint } = await import('../server/pipeline/index.js');
+
+  assert.throws(() => refuseSingleViewpoint('pano', 6), /single 360 photo/);
+  assert.throws(() => refuseSingleViewpoint('pano', 6), /no parallax/);
+  assert.throws(() => refuseSingleViewpoint('pano', 3), /single 360 photo/);
+
+  // Two panoramas have a baseline between them, so they are allowed through.
+  assert.doesNotThrow(() => refuseSingleViewpoint('pano', 12));
+  // And ordinary captures are never subject to this, however few frames.
+  assert.doesNotThrow(() => refuseSingleViewpoint('photos', 4));
+  assert.doesNotThrow(() => refuseSingleViewpoint('video', 6));
+});
