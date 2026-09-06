@@ -28,16 +28,36 @@ def load_estimator(model_name: str = DEFAULT_MODEL, device: str = "cpu"):
         ) from exc
 
     try:
-        import torch
-        # transformers wants a device index, not a torch device string.
-        index = 0 if str(device).startswith("cuda") and torch.cuda.is_available() else -1
-        return pipeline("depth-estimation", model=model_name, device=index)
+        return pipeline("depth-estimation", model=model_name, device=resolve_device(device))
     except Exception as exc:                                     # pragma: no cover
         raise RuntimeError(
             f"Could not load the depth model {model_name!r}: {exc}. "
             "The first run downloads it, so this machine needs to reach "
             "huggingface.co once; afterwards it is cached."
         ) from exc
+
+
+def resolve_device(requested: str) -> str:
+    """The device to actually run on, as a string transformers accepts.
+
+    A string rather than the device index the older API took: an index cannot
+    express "cuda:1", so asking for the second GPU quietly ran on the first.
+
+    Falling back to the CPU when CUDA was asked for and is not there is
+    deliberate. This is a one-shot estimate over six images, so a slow answer
+    beats no answer -- unlike training, where the same fallback would turn a
+    two-minute run into an hour without saying why.
+    """
+    wanted = str(requested or "cpu").strip().lower()
+    if not wanted.startswith("cuda"):
+        return "cpu"
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return wanted
+    except ImportError:                                          # pragma: no cover
+        pass
+    return "cpu"
 
 
 def estimate(estimator, image) -> np.ndarray:

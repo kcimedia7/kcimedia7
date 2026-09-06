@@ -369,3 +369,46 @@ def test_the_whole_panorama_path_runs_without_a_downloaded_model(tmp_path, monke
     distances = np.linalg.norm(xyz, axis=1)
     assert distances.std() / distances.mean() < 0.05, (
         f"the faces did not align: radii {distances.min():.2f}..{distances.max():.2f}")
+
+
+def test_the_device_reaches_the_model_as_something_it_understands():
+    """A device index cannot express "cuda:1".
+
+    The older API took one, so asking for the second GPU quietly ran on the
+    first. Passing the string through keeps that distinction.
+    """
+    from splatworks_train.depth_model import resolve_device
+
+    assert resolve_device("cpu") == "cpu"
+    assert resolve_device("") == "cpu"
+    assert resolve_device(None) == "cpu"
+    assert resolve_device("CUDA") in ("cuda", "cpu")     # depends on the machine
+
+    import torch
+    if torch.cuda.is_available():
+        assert resolve_device("cuda") == "cuda"
+        assert resolve_device("cuda:1") == "cuda:1", "the device number must survive"
+    else:
+        # No CUDA: a one-shot estimate over six images should still run rather
+        # than fail, unlike training where a silent fallback costs an hour.
+        assert resolve_device("cuda") == "cpu"
+        assert resolve_device("cuda:1") == "cpu"
+
+
+def test_the_result_shape_this_code_expects_is_what_the_library_returns():
+    """Pinned against the installed transformers, not against my memory of it.
+
+    The pipeline returns both a raw tensor and an eight-bit image; reading the
+    image instead would band a large scene visibly, so which key is preferred
+    matters and should break loudly if the library changes it.
+    """
+    transformers = pytest.importorskip("transformers")
+    import inspect
+    from transformers.pipelines.depth_estimation import DepthEstimationPipeline
+
+    source = inspect.getsource(DepthEstimationPipeline.postprocess)
+    assert '"predicted_depth"' in source, "the raw tensor key is gone"
+    assert '"depth"' in source, "the image key is gone"
+
+    from transformers.pipelines import SUPPORTED_TASKS
+    assert "depth-estimation" in SUPPORTED_TASKS
