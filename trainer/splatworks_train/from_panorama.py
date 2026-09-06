@@ -75,7 +75,9 @@ def main(argv=None) -> int:
     p.add_argument("--output", required=True)
     p.add_argument("--fov", type=float, default=100.0,
                    help="field of view each view was reprojected at")
-    p.add_argument("--max-points", type=int, default=600_000)
+    p.add_argument("--max-points", type=int, default=2_000_000,
+                   help="thinning below the source resolution costs sharpness, "
+                        "so this is high enough to keep a 2k panorama whole")
     p.add_argument("--device", default="cpu")
     p.add_argument("--model", default=None)
     p.add_argument("--opacity", type=float, default=0.9)

@@ -365,7 +365,7 @@ test('an absurd detail setting is clamped rather than passed through', async () 
     trainResolution: 999_999, maxGaussians: 99_000_000, panoResolution: 1_000_000,
   });
   assert.equal(clamped.trainResolution, 3200);
-  assert.equal(clamped.maxGaussians, 2_000_000);
+  assert.equal(clamped.maxGaussians, 8_000_000);
   assert.equal(clamped.panoResolution, 16_384);
 
   const floored = sanitiseSettings({ trainResolution: -5, panoResolution: 1 });

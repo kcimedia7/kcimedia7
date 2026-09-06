@@ -319,10 +319,14 @@ export function sanitiseSettings(input) {
   // The ceiling is above the reference implementation's 1600 because cost is
   // quadratic in it and the choice belongs to whoever owns the GPU.
   num('trainResolution', 96, 3200);
-  num('maxGaussians', 1000, 2_000_000);
+  num('maxGaussians', 1000, 8_000_000);
   // Width the source panorama is decoded at; the client derives the extracted
   // view size from it, so the two cannot drift apart.
   num('panoResolution', 512, 16_384);
+  // How much further the sky sits than the nearest surface, for the depth
+  // backend. A single photo cannot say, so it is a choice rather than a
+  // measurement -- and a large value spends most of the scene on empty space.
+  num('farRatio', 2, 500);
   return out;
 }
 

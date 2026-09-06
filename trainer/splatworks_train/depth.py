@@ -237,8 +237,15 @@ def build_cloud(images, depths, fov_deg: float, max_points: int = 600_000,
     positions, colours, radii = positions[keep], colours[keep], radii[keep]
 
     if max_points and positions.shape[0] > max_points:
+        kept = max_points / positions.shape[0]
         pick = np.random.default_rng(seed).choice(
             positions.shape[0], max_points, replace=False)
         positions, colours, radii = positions[pick], colours[pick], radii[pick]
+        # Thinning the cloud spreads the survivors out: keeping a fraction f of
+        # a surface leaves them 1/sqrt(f) further apart. Gaussians still sized
+        # for the original spacing no longer touch, and the scene renders as a
+        # field of separate dots with the background showing through -- which
+        # is what it did, at 32% of the points, until this line existed.
+        radii = (radii / np.sqrt(kept)).astype(np.float32)
 
     return positions, colours, radii

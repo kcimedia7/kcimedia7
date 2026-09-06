@@ -412,3 +412,37 @@ def test_the_result_shape_this_code_expects_is_what_the_library_returns():
 
     from transformers.pipelines import SUPPORTED_TASKS
     assert "depth-estimation" in SUPPORTED_TASKS
+
+
+def test_thinning_the_cloud_grows_the_gaussians_to_match():
+    """Keeping a fraction of a surface spreads the survivors out.
+
+    Keep f of the points and they sit 1/sqrt(f) further apart. Gaussians left
+    at their original size stop touching, and the scene renders as a field of
+    separate dots with the background between them rather than as surfaces --
+    which is exactly what it did at 32% of the points.
+    """
+    images, disparities = [], []
+    size = 32
+    for name in FACE_NAMES:
+        dirs = ray_directions(name, size, FOV)
+        forward, _, _ = face_basis(name)
+        disparities.append(1.0 / (4.0 * (dirs @ forward)))
+        images.append((name, np.full((size, size, 3), 120, dtype=np.uint8)))
+
+    total = len(FACE_NAMES) * size * size
+    _, _, full = build_cloud(images, disparities, FOV, max_points=0)
+    assert full.shape[0] == total
+
+    kept = total // 4
+    _, _, thinned = build_cloud(images, disparities, FOV, max_points=kept)
+    assert thinned.shape[0] == kept
+
+    # A quarter of the points means twice the spacing, so twice the radius.
+    ratio = float(np.median(thinned)) / float(np.median(full))
+    assert abs(ratio - 2.0) < 0.05, (
+        f"a quarter of the points should double the gaussian size, got {ratio:.2f}x")
+
+    # A cloud small enough to keep whole must not be inflated.
+    _, _, uncapped = build_cloud(images, disparities, FOV, max_points=total * 2)
+    assert abs(float(np.median(uncapped)) - float(np.median(full))) < 1e-6

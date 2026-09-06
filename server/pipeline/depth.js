@@ -25,7 +25,10 @@ export async function runDepthReconstruction({
   await fsp.mkdir(outputDir, { recursive: true });
 
   const device = resolveDevice(settings.device);
-  const maxPoints = clampInt(settings.maxGaussians, 10_000, 2_000_000, 600_000);
+  // A 2k panorama unprojects to about 1.85M points. Thinning below the
+  // source resolution spreads the gaussians out and costs sharpness, so the
+  // default keeps one whole rather than discarding two thirds of it.
+  const maxPoints = clampInt(settings.maxGaussians, 10_000, 8_000_000, 2_000_000);
   const fov = clampNumber(settings.panoFovDeg, 40, 179, 100);
   const farRatio = clampNumber(settings.farRatio, 5, 500, 60);
 
