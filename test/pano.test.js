@@ -503,3 +503,13 @@ test('a tier never invents detail the panorama does not have', () => {
   // And a source larger than the tier is still limited by the tier.
   assert.equal(faceSizeFor(Math.min(2048, 16384)), faceSizeFor(2048));
 });
+
+test('the face order is the contract the depth backend depends on', () => {
+  // The server discards uploaded filenames and stores frames as
+  // frame_00001.png upwards, so nothing in the name says which direction a
+  // view looked. Upload order is all that is left, and the Python side maps
+  // position to face using this exact list. Reordering it here silently
+  // rotates every single-panorama scene.
+  assert.deepEqual(CUBE_FACES.map((f) => f.name),
+    ['front', 'right', 'back', 'left', 'up', 'down']);
+});

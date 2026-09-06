@@ -26,29 +26,45 @@ def log(message: str) -> None:
 
 
 def load_faces(image_dir: Path):
-    """Read the six views, in the order the geometry expects them.
+    """Read the six views and work out which direction each one looked.
 
-    Ordering by name rather than by filename: the unprojection needs to know
-    which direction each image looked, and a sorted directory listing would put
-    'back' first and silently rotate the whole scene.
+    Two ways, because the two callers name their files differently. The server
+    stores what it receives as frame_00001.png upwards, discarding the original
+    names, so upload order is the only thing left that says which view is
+    which -- and the browser emits them in the canonical face order, which is
+    the contract those two halves share. A filename that does name its face
+    wins, so the backend can also be pointed at a directory by hand.
+
+    Getting this wrong does not fail: the views are all valid images and the
+    cloud builds, rotated to somewhere the photograph never looked.
     """
-    found = {}
-    for path in sorted(image_dir.iterdir()):
-        if path.suffix.lower() not in {".png", ".jpg", ".jpeg"}:
-            continue
+    paths = sorted(p for p in image_dir.iterdir()
+                   if p.suffix.lower() in {".png", ".jpg", ".jpeg"})
+
+    named = {}
+    for path in paths:
         for name in FACE_NAMES:
             if name in path.stem.lower():
-                found.setdefault(name, path)
-    missing = [n for n in FACE_NAMES if n not in found]
-    if missing:
+                named.setdefault(name, path)
+
+    if len(named) == len(FACE_NAMES):
+        chosen = [(name, named[name]) for name in FACE_NAMES]
+    elif len(paths) == len(FACE_NAMES):
+        # Upload order, which is the order the browser reprojects them in.
+        chosen = list(zip(FACE_NAMES, paths))
+    else:
         raise SystemExit(
-            f"missing {len(missing)} of the six panorama views: {', '.join(missing)}. "
-            "This backend reads the views named after the direction they face.")
+            f"expected {len(FACE_NAMES)} panorama views, found {len(paths)} image(s) "
+            f"in {image_dir}. This backend converts one 360 photo, which the browser "
+            "resamples into exactly six views.")
+
     images = []
-    for name in FACE_NAMES:
-        rgb = np.asarray(Image.open(found[name]).convert("RGB"))
+    for name, path in chosen:
+        rgb = np.asarray(Image.open(path).convert("RGB"))
         if rgb.shape[0] != rgb.shape[1]:
-            raise SystemExit(f"{found[name].name} is {rgb.shape[1]}x{rgb.shape[0]}, not square")
+            raise SystemExit(f"{path.name} is {rgb.shape[1]}x{rgb.shape[0]}, not square. "
+                             "The panorama views are square by construction, so this "
+                             "directory holds something else.")
         images.append((name, rgb))
     return images
 

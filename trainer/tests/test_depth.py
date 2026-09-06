@@ -241,33 +241,65 @@ def test_the_cloud_is_capped_without_biasing_where_the_points_come_from():
     assert np.abs(positions.mean(axis=0)).max() < 0.6, "the sample is lopsided"
 
 
-def test_the_views_are_read_by_direction_not_by_filename_order(tmp_path):
-    """A sorted listing puts 'back' first, which rotates the whole scene.
-
-    Nothing errors when that happens: the cloud is built, it has the right
-    number of points, and it is turned ninety degrees from the photograph.
-    """
+def write_views(directory, namer):
+    """Six tagged views, named by whichever scheme is being tested."""
     from PIL import Image
-    from splatworks_train.from_panorama import load_faces
-
     for index, name in enumerate(FACE_NAMES):
         rgb = np.zeros((8, 8, 3), dtype=np.uint8)
         rgb[:, :, 0] = index * 40          # a tag identifying which face this is
-        Image.fromarray(rgb).save(tmp_path / f"frame_{index:05d}_{name}.png")
+        Image.fromarray(rgb).save(directory / namer(index, name))
 
+
+def test_views_stored_the_way_the_server_stores_them_are_read_correctly(tmp_path):
+    """The naming this actually has to cope with.
+
+    The server discards the uploaded filenames and writes frame_00001.png
+    upwards, so nothing in the name says which direction a view looked. Reading
+    them by name finds no match at all -- which is how this backend failed on
+    every real upload while its test passed, because the test invented a naming
+    scheme that suited it.
+    """
+    from splatworks_train.from_panorama import load_faces
+
+    write_views(tmp_path, lambda index, name: f"frame_{index + 1:05d}.png")
     loaded = load_faces(tmp_path)
     assert [name for name, _ in loaded] == list(FACE_NAMES), "faces came back out of order"
     for index, (_, rgb) in enumerate(loaded):
         assert rgb[0, 0, 0] == index * 40, "a face was matched to the wrong image"
 
 
-def test_a_missing_view_is_named_rather_than_silently_reconstructed(tmp_path):
+def test_a_filename_that_names_its_face_is_believed_over_its_position(tmp_path):
+    # So the backend can be pointed at a directory by hand, in any order.
+    from splatworks_train.from_panorama import load_faces
+
+    reversed_names = list(reversed(FACE_NAMES))
+    write_views(tmp_path, lambda index, name: f"{index:02d}_{reversed_names[index]}.png")
+    loaded = load_faces(tmp_path)
+    assert [name for name, _ in loaded] == list(FACE_NAMES)
+    # 'front' is last in the file order here, so it must carry the last tag.
+    front_tag = dict(loaded)["front"][0, 0, 0]
+    assert front_tag == (len(FACE_NAMES) - 1) * 40, "the filename was ignored"
+
+
+def test_the_wrong_number_of_views_is_refused_rather_than_guessed(tmp_path):
     from PIL import Image
     from splatworks_train.from_panorama import load_faces
 
-    for name in FACE_NAMES[:4]:
-        Image.fromarray(np.zeros((8, 8, 3), np.uint8)).save(tmp_path / f"{name}.png")
-    with pytest.raises(SystemExit, match="up|down"):
+    for index in range(4):
+        Image.fromarray(np.zeros((8, 8, 3), np.uint8)).save(tmp_path / f"frame_{index:05d}.png")
+    with pytest.raises(SystemExit, match="expected 6"):
+        load_faces(tmp_path)
+
+
+def test_frames_that_are_not_panorama_views_are_refused(tmp_path):
+    # Six ordinary photographs would otherwise be read as a panorama and
+    # unprojected into a scene that never existed.
+    from PIL import Image
+    from splatworks_train.from_panorama import load_faces
+
+    for index in range(6):
+        Image.fromarray(np.zeros((6, 10, 3), np.uint8)).save(tmp_path / f"frame_{index:05d}.png")
+    with pytest.raises(SystemExit, match="not square"):
         load_faces(tmp_path)
 
 
@@ -285,7 +317,8 @@ def test_the_whole_panorama_path_runs_without_a_downloaded_model(tmp_path, monke
     images.mkdir()
     for index, name in enumerate(FACE_NAMES):
         rgb = np.full((32, 32, 3), 60 + index * 20, dtype=np.uint8)
-        Image.fromarray(rgb).save(images / f"frame_{index:05d}_{name}.png")
+        # Named exactly as the server names them: no face in the filename.
+        Image.fromarray(rgb).save(images / f"frame_{index + 1:05d}.png")
 
     # A sphere at radius 5, expressed the way a model would report it, and with
     # a different arbitrary scale per face so alignment has work to do.

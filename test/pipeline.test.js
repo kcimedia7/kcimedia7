@@ -302,3 +302,20 @@ test('depth progress follows the estimator through its six views', async () => {
   assert.ok(parseProgress('wrote /x/point_cloud.ply (500 gaussians, 1 bytes)').fraction === 1);
   assert.equal(parseProgress('something else entirely'), null);
 });
+
+test('panorama views are uploaded in the order the depth backend expects', async () => {
+  // Pinned on the JavaScript side too: the browser emits one frame per face by
+  // iterating CUBE_FACES, and the server numbers them in arrival order, so the
+  // list order *is* the wire format. A reordering here and a matching one in
+  // Python would still be wrong -- hence the same list asserted in both.
+  const { CUBE_FACES } = await import('../web/js/pano.js');
+  const source = await fsp.readFile(
+    new URL('../web/js/frames.js', import.meta.url), 'utf8');
+
+  // The loop that produces the frames must walk CUBE_FACES, in its own order,
+  // rather than a filtered or sorted copy.
+  assert.match(source, /for \(const face of CUBE_FACES\) \{/,
+    'framesFromPano must iterate CUBE_FACES directly to preserve upload order');
+  assert.deepEqual(CUBE_FACES.map((f) => f.name),
+    ['front', 'right', 'back', 'left', 'up', 'down']);
+});
